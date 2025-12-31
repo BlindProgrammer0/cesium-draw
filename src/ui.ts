@@ -3,6 +3,7 @@ import { PickService } from "./viewer/PickService";
 import { PolygonDrawTool } from "./viewer/PolygonDrawTool";
 import { geojsonFeatureCollectionFromEntities } from "./viewer/geojson";
 import { CommandStack } from "./viewer/commands/CommandStack";
+import { PolygonEditTool } from "./viewer/edit/PolygonEditTool";
 
 export function createApp(mountEl: HTMLElement) {
   (window as any).CESIUM_BASE_URL = "/cesium/";
@@ -16,12 +17,13 @@ export function createApp(mountEl: HTMLElement) {
   const panel = document.createElement("div");
   panel.className = "panel";
   panel.innerHTML = `
-    <h1>阶段 1：全局 CommandStack（Undo/Redo）+ Polygon 绘制</h1>
+    <h1>阶段 2：选中 + 顶点拖拽编辑（编辑也可 Undo/Redo）</h1>
 
     <div class="row">
       <span class="badge"><span class="dot off" id="stateDot"></span><span id="stateText">idle</span></span>
       <span class="badge"><b>点数：</b><span id="ptCount">0</span></span>
       <span class="badge"><b>已提交：</b><span id="committedCount">0</span></span>
+      <span class="badge"><b>选中：</b><span id="selectedId">-</span></span>
       <span class="badge"><b>Undo/Redo：</b><span id="cmdCount">0/0</span></span>
     </div>
 
@@ -35,19 +37,21 @@ export function createApp(mountEl: HTMLElement) {
       <button class="btn" id="btnRedoCmd">Redo</button>
 
       <button class="btn" id="btnClearCommitted">清空已提交（可 Undo）</button>
+      <button class="btn danger" id="btnDeleteSelected">删除选中（可 Undo）</button>
+      <button class="btn" id="btnDeselect">取消选中</button>
       <button class="btn" id="btnExport">导出 GeoJSON</button>
       <button class="btn" id="btnCopy">复制 GeoJSON</button>
     </div>
 
     <div class="kv">
-      <div><b>PickService</b></div>
-      <div>单击地球可拾取位置（经纬度/高度），并打印到控制台。绘制时自动使用拾取位置。</div>
-      <div><b>命令栈</b></div>
-      <div>“完成提交 Polygon”和“清空已提交”都会进入命令栈，因此支持全局 Undo/Redo。</div>
+      <div><b>编辑方式</b></div>
+      <div>单击已提交 Polygon 选中（会高亮并出现橙色顶点）。拖拽顶点即可编辑，松手后自动入命令栈（可 Undo/Redo）。</div>
+      <div><b>快捷键</b></div>
+      <div>Esc 取消选中；Delete/Backspace 删除选中（可 Undo）。</div>
     </div>
 
     <textarea class="textarea" id="geojsonOut" spellcheck="false" placeholder="点击“导出 GeoJSON”后，这里会输出 FeatureCollection..."></textarea>
-    <div class="hint">提示：撤销加点只作用于绘制中；Undo/Redo 作用于已提交动作（命令栈）。</div>
+    <div class="hint">提示：撤销加点只作用于绘制中；Undo/Redo 作用于已提交动作（提交/清空/编辑/删除）。</div>
   `;
 
   root.appendChild(container);
@@ -72,6 +76,7 @@ export function createApp(mountEl: HTMLElement) {
 
   const pick = new PickService(viewer);
 
+  // 单击拾取演示（控制台输出；不影响绘制/编辑）
   const clickHandler = new Cesium.ScreenSpaceEventHandler(viewer.canvas);
   clickHandler.setInputAction((movement: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     const cart = pick.pickPosition(movement.position);
@@ -92,14 +97,19 @@ export function createApp(mountEl: HTMLElement) {
     pointColor: Cesium.Color.YELLOW.withAlpha(0.95),
   });
 
+  const edit = new PolygonEditTool(viewer, draw.ds, pick, stack, () => draw.state === "drawing");
+
+  // ---- UI wiring ----
   const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
   const stateDot = $("stateDot");
   const stateText = $("stateText");
   const ptCount = $("ptCount");
   const committedCount = $("committedCount");
+  const selectedId = $("selectedId");
   const cmdCount = $("cmdCount");
   const btnUndoCmd = $("btnUndoCmd") as HTMLButtonElement;
   const btnRedoCmd = $("btnRedoCmd") as HTMLButtonElement;
+  const btnDeleteSelected = $("btnDeleteSelected") as HTMLButtonElement;
   const geojsonOut = $("geojsonOut") as HTMLTextAreaElement;
 
   function refreshStatus() {
@@ -108,15 +118,29 @@ export function createApp(mountEl: HTMLElement) {
     committedCount.textContent = String(draw.committedCount);
     stateDot.classList.toggle("off", draw.state === "idle");
 
+    selectedId.textContent = edit.selectedEntityId ?? "-";
+
     cmdCount.textContent = `${stack.undoCount}/${stack.redoCount}`;
     btnUndoCmd.disabled = !stack.canUndo;
     btnRedoCmd.disabled = !stack.canRedo;
+
+    btnDeleteSelected.disabled = !edit.selectedEntityId;
   }
 
   draw.onStateChange(refreshStatus);
   draw.onPointChange(refreshStatus);
-  draw.onCommittedChange(refreshStatus);
-  stack.onChange(refreshStatus);
+  draw.onCommittedChange(() => {
+    // committed 变动时，如果选中的 entity 不存在了（清空/undo 等），取消选中
+    const id = edit.selectedEntityId;
+    if (id && !draw.ds.entities.getById(id)) edit.deselect();
+    refreshStatus();
+  });
+  edit.onChange(refreshStatus);
+  stack.onChange(() => {
+    // undo/redo 后刷新 handles
+    if (edit.selectedEntityId) edit.refreshHandles();
+    refreshStatus();
+  });
   refreshStatus();
 
   $("btnStart").addEventListener("click", () => draw.start());
@@ -128,9 +152,17 @@ export function createApp(mountEl: HTMLElement) {
   btnRedoCmd.addEventListener("click", () => stack.redo());
 
   $("btnClearCommitted").addEventListener("click", () => {
+    edit.deselect();
     draw.clearAllCommitted();
     geojsonOut.value = "";
   });
+
+  $("btnDeleteSelected").addEventListener("click", () => {
+    edit.deleteSelected();
+    geojsonOut.value = "";
+  });
+
+  $("btnDeselect").addEventListener("click", () => edit.deselect());
 
   $("btnExport").addEventListener("click", () => {
     geojsonOut.value = JSON.stringify(geojsonFeatureCollectionFromEntities(draw.getCommittedEntities()), null, 2);
@@ -153,5 +185,5 @@ export function createApp(mountEl: HTMLElement) {
     duration: 0.8,
   });
 
-  return { viewer, draw, pick, stack };
+  return { viewer, draw, edit, pick, stack };
 }

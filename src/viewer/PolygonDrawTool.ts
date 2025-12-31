@@ -88,7 +88,7 @@ export class PolygonDrawTool {
       this.ds,
       { positions: snapPositions, material, outlineColor, name: "polygon" },
       (e) => { this.committed.push(e); this.emitCommitted(); },
-      (e) => { this.committed = this.committed.filter((x) => x.id !== e.id); this.emitCommitted(); },
+      (id) => { this.committed = this.committed.filter((x) => String(x.id) !== id); this.emitCommitted(); },
     ));
 
     this.cleanupPreview();
@@ -103,7 +103,7 @@ export class PolygonDrawTool {
 
     setTimeout(() => {
       if (this.state === "committed") { this.state = "idle"; this.emitState(); }
-    }, 300);
+    }, 250);
   }
 
   cancel() {
