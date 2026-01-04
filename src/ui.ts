@@ -17,13 +17,14 @@ export function createApp(mountEl: HTMLElement) {
   const panel = document.createElement("div");
   panel.className = "panel";
   panel.innerHTML = `
-    <h1>阶段 2：选中 + 顶点拖拽编辑（编辑也可 Undo/Redo）</h1>
+    <h1>阶段 3：插入点/删单点/整体平移/吸附阈值（全部可 Undo/Redo）</h1>
 
     <div class="row">
       <span class="badge"><span class="dot off" id="stateDot"></span><span id="stateText">idle</span></span>
       <span class="badge"><b>点数：</b><span id="ptCount">0</span></span>
       <span class="badge"><b>已提交：</b><span id="committedCount">0</span></span>
       <span class="badge"><b>选中：</b><span id="selectedId">-</span></span>
+      <span class="badge"><b>顶点：</b><span id="activeVertex">-</span></span>
       <span class="badge"><b>Undo/Redo：</b><span id="cmdCount">0/0</span></span>
     </div>
 
@@ -37,21 +38,41 @@ export function createApp(mountEl: HTMLElement) {
       <button class="btn" id="btnRedoCmd">Redo</button>
 
       <button class="btn" id="btnClearCommitted">清空已提交（可 Undo）</button>
-      <button class="btn danger" id="btnDeleteSelected">删除选中（可 Undo）</button>
+      <button class="btn danger" id="btnDeleteSelected">删除选中 Polygon（可 Undo）</button>
+      <button class="btn danger" id="btnDeleteVertex">删除选中顶点（可 Undo）</button>
       <button class="btn" id="btnDeselect">取消选中</button>
       <button class="btn" id="btnExport">导出 GeoJSON</button>
       <button class="btn" id="btnCopy">复制 GeoJSON</button>
     </div>
 
+    <div class="row">
+      <label class="field">
+        <input type="checkbox" id="snapEnabled" checked />
+        吸附
+      </label>
+      <label class="field">
+        阈值(px)
+        <input type="range" id="snapThreshold" min="4" max="32" value="12" />
+        <code id="snapThresholdVal">12</code>
+      </label>
+    </div>
+
     <div class="kv">
-      <div><b>编辑方式</b></div>
-      <div>单击已提交 Polygon 选中（会高亮并出现橙色顶点）。拖拽顶点即可编辑，松手后自动入命令栈（可 Undo/Redo）。</div>
-      <div><b>快捷键</b></div>
-      <div>Esc 取消选中；Delete/Backspace 删除选中（可 Undo）。</div>
+      <div><b>插入点</b></div>
+      <div>选中 Polygon 后，按住 <b>Ctrl</b> 并点击边附近，会在最近边插入顶点（支持 Undo/Redo）。</div>
+
+      <div><b>删单点</b></div>
+      <div>点击某个橙色顶点（会变红）后，按 <b>Delete</b> 删除该顶点（至少保留 3 个点）。</div>
+
+      <div><b>整体平移</b></div>
+      <div>按住 <b>Shift</b> 并拖拽 Polygon，可整体平移（支持吸附与 Undo/Redo）。</div>
+
+      <div><b>吸附</b></div>
+      <div>拖拽顶点/平移时，若鼠标附近有其他顶点（像素距离 &le; 阈值），会吸附到该顶点。</div>
     </div>
 
     <textarea class="textarea" id="geojsonOut" spellcheck="false" placeholder="点击“导出 GeoJSON”后，这里会输出 FeatureCollection..."></textarea>
-    <div class="hint">提示：撤销加点只作用于绘制中；Undo/Redo 作用于已提交动作（提交/清空/编辑/删除）。</div>
+    <div class="hint">提示：撤销加点只作用于绘制中；Undo/Redo 作用于已提交动作（提交/清空/编辑/插点/删点/删除）。</div>
   `;
 
   root.appendChild(container);
@@ -76,41 +97,57 @@ export function createApp(mountEl: HTMLElement) {
 
   const pick = new PickService(viewer);
 
-  // 单击拾取演示（控制台输出；不影响绘制/编辑）
   const clickHandler = new Cesium.ScreenSpaceEventHandler(viewer.canvas);
-  clickHandler.setInputAction((movement: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
-    const cart = pick.pickPosition(movement.position);
-    if (!cart) return;
-    const c = Cesium.Cartographic.fromCartesian(cart);
-    console.log("[PickService] lon/lat/height:", {
-      lng: Cesium.Math.toDegrees(c.longitude),
-      lat: Cesium.Math.toDegrees(c.latitude),
-      h: c.height ?? 0,
-    });
-  }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+  clickHandler.setInputAction(
+    (movement: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
+      const cart = pick.pickPosition(movement.position);
+      if (!cart) return;
+      const c = Cesium.Cartographic.fromCartesian(cart);
+      console.log("[PickService] lon/lat/height:", {
+        lng: Cesium.Math.toDegrees(c.longitude),
+        lat: Cesium.Math.toDegrees(c.latitude),
+        h: c.height ?? 0,
+      });
+    },
+    Cesium.ScreenSpaceEventType.LEFT_CLICK
+  );
 
   const stack = new CommandStack();
 
   const draw = new PolygonDrawTool(viewer, pick, stack, {
-    polygonMaterial: new Cesium.ColorMaterialProperty(Cesium.Color.CYAN.withAlpha(0.25)),
+    polygonMaterial: new Cesium.ColorMaterialProperty(
+      Cesium.Color.CYAN.withAlpha(0.25)
+    ),
     outlineColor: Cesium.Color.CYAN.withAlpha(0.95),
     pointColor: Cesium.Color.YELLOW.withAlpha(0.95),
   });
 
-  const edit = new PolygonEditTool(viewer, draw.ds, pick, stack, () => draw.state === "drawing");
+  const edit = new PolygonEditTool(
+    viewer,
+    draw.ds,
+    pick,
+    stack,
+    () => draw.state === "drawing"
+  );
 
-  // ---- UI wiring ----
-  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+  const $ = <T extends HTMLElement>(id: string) =>
+    document.getElementById(id) as T;
   const stateDot = $("stateDot");
   const stateText = $("stateText");
   const ptCount = $("ptCount");
   const committedCount = $("committedCount");
   const selectedId = $("selectedId");
+  const activeVertex = $("activeVertex");
   const cmdCount = $("cmdCount");
   const btnUndoCmd = $("btnUndoCmd") as HTMLButtonElement;
   const btnRedoCmd = $("btnRedoCmd") as HTMLButtonElement;
   const btnDeleteSelected = $("btnDeleteSelected") as HTMLButtonElement;
+  const btnDeleteVertex = $("btnDeleteVertex") as HTMLButtonElement;
   const geojsonOut = $("geojsonOut") as HTMLTextAreaElement;
+
+  const snapEnabled = $("snapEnabled") as HTMLInputElement;
+  const snapThreshold = $("snapThreshold") as HTMLInputElement;
+  const snapThresholdVal = $("snapThresholdVal");
 
   function refreshStatus() {
     stateText.textContent = draw.state;
@@ -119,25 +156,39 @@ export function createApp(mountEl: HTMLElement) {
     stateDot.classList.toggle("off", draw.state === "idle");
 
     selectedId.textContent = edit.selectedEntityId ?? "-";
+    activeVertex.textContent =
+      edit.activeVertexIndex === null ? "-" : String(edit.activeVertexIndex);
 
     cmdCount.textContent = `${stack.undoCount}/${stack.redoCount}`;
     btnUndoCmd.disabled = !stack.canUndo;
     btnRedoCmd.disabled = !stack.canRedo;
 
     btnDeleteSelected.disabled = !edit.selectedEntityId;
+    btnDeleteVertex.disabled = !(
+      edit.selectedEntityId && edit.activeVertexIndex !== null
+    );
   }
+
+  snapEnabled.addEventListener("change", () =>
+    edit.setSnapEnabled(snapEnabled.checked)
+  );
+  snapThreshold.addEventListener("input", () => {
+    const v = Number(snapThreshold.value);
+    snapThresholdVal.textContent = String(v);
+    edit.setSnapThresholdPx(v);
+  });
+  edit.setSnapEnabled(true);
+  edit.setSnapThresholdPx(Number(snapThreshold.value));
 
   draw.onStateChange(refreshStatus);
   draw.onPointChange(refreshStatus);
   draw.onCommittedChange(() => {
-    // committed 变动时，如果选中的 entity 不存在了（清空/undo 等），取消选中
     const id = edit.selectedEntityId;
     if (id && !draw.ds.entities.getById(id)) edit.deselect();
     refreshStatus();
   });
   edit.onChange(refreshStatus);
   stack.onChange(() => {
-    // undo/redo 后刷新 handles
     if (edit.selectedEntityId) edit.refreshHandles();
     refreshStatus();
   });
@@ -158,14 +209,23 @@ export function createApp(mountEl: HTMLElement) {
   });
 
   $("btnDeleteSelected").addEventListener("click", () => {
-    edit.deleteSelected();
+    edit.deleteSelectedPolygon();
+    geojsonOut.value = "";
+  });
+
+  $("btnDeleteVertex").addEventListener("click", () => {
+    edit.deleteActiveVertex();
     geojsonOut.value = "";
   });
 
   $("btnDeselect").addEventListener("click", () => edit.deselect());
 
   $("btnExport").addEventListener("click", () => {
-    geojsonOut.value = JSON.stringify(geojsonFeatureCollectionFromEntities(draw.getCommittedEntities()), null, 2);
+    geojsonOut.value = JSON.stringify(
+      geojsonFeatureCollectionFromEntities(draw.getCommittedEntities()),
+      null,
+      2
+    );
   });
 
   $("btnCopy").addEventListener("click", async () => {

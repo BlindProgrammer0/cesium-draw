@@ -6,25 +6,13 @@ export class CommandStack {
   private undone: Command[] = [];
   private listeners: Listener[] = [];
 
-  onChange(fn: Listener) {
-    this.listeners.push(fn);
-  }
-  private emit() {
-    for (const fn of this.listeners) fn();
-  }
+  onChange(fn: Listener) { this.listeners.push(fn); }
+  private emit() { for (const fn of this.listeners) fn(); }
 
-  get canUndo() {
-    return this.done.length > 0;
-  }
-  get canRedo() {
-    return this.undone.length > 0;
-  }
-  get undoCount() {
-    return this.done.length;
-  }
-  get redoCount() {
-    return this.undone.length;
-  }
+  get canUndo() { return this.done.length > 0; }
+  get canRedo() { return this.undone.length > 0; }
+  get undoCount() { return this.done.length; }
+  get redoCount() { return this.undone.length; }
 
   push(cmd: Command) {
     cmd.do();
@@ -49,9 +37,5 @@ export class CommandStack {
     this.emit();
   }
 
-  clear() {
-    this.done = [];
-    this.undone = [];
-    this.emit();
-  }
+  clear() { this.done = []; this.undone = []; this.emit(); }
 }
