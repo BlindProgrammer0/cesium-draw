@@ -72,6 +72,41 @@ export class ClearAllFeaturesCommand implements Command {
   }
 }
 
+/**
+ * Upsert a batch of features as a single undoable command.
+ * - If a feature id already exists, it is replaced (and old value is restored on undo).
+ * - If it doesn't exist, it is removed on undo.
+ */
+export class UpsertManyFeaturesCommand implements Command {
+  readonly name = "UpsertManyFeatures";
+  private beforeById = new Map<FeatureId, FeatureSnapshot | null>();
+  private readonly items: FeatureSnapshot[];
+
+  constructor(private readonly store: FeatureStore, features: Feature[]) {
+    this.items = features.map(snapshotFeature);
+  }
+
+  do(): void {
+    for (const f of this.items) {
+      if (!this.beforeById.has(f.id)) {
+        const existed = this.store.get(f.id);
+        this.beforeById.set(f.id, existed ? snapshotFeature(existed) : null);
+      }
+      this.store.upsert(f);
+    }
+  }
+
+  undo(): void {
+    // reverse order for deterministic restore
+    const ids = Array.from(this.beforeById.keys()).reverse();
+    for (const id of ids) {
+      const before = this.beforeById.get(id) ?? null;
+      if (before) this.store.upsert(before);
+      else this.store.remove(id);
+    }
+  }
+}
+
 export function snapshotFeature(f: Feature): FeatureSnapshot {
   // Deep clone while preserving Cesium.Cartesian3.
   if (f.kind === "polygon") {

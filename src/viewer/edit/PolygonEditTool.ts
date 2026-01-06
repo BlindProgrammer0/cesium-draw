@@ -42,6 +42,14 @@ export class PolygonEditTool {
   private dragBeforeFeature: any | null = null;
   private dragStartAnchor: Cesium.Cartesian3 | null = null;
 
+  /**
+   * Stage 5.4: edit transaction preview.
+   * During drag we do NOT upsert FeatureStore on every mousemove.
+   * We preview by directly updating the selected entity + handles, and only
+   * commit once on LEFT_UP as a single UpdateFeatureCommand.
+   */
+  private dragPreviewPositions: Cesium.Cartesian3[] | null = null;
+
   private originalStyle = new Map<string, StyleSnapshot>();
   private listeners: Listener[] = [];
 
@@ -181,7 +189,7 @@ export class PolygonEditTool {
               })
             : p;
 
-          this.applyVertexMove(this.dragIndex, snapped);
+          this.applyVertexMovePreview(this.dragIndex, snapped);
           return;
         }
 
@@ -217,7 +225,7 @@ export class PolygonEditTool {
             Cesium.Cartesian3.add(p0, delta, new Cesium.Cartesian3())
           );
 
-          this.applyPositions(next);
+          this.applyPositionsPreview(next);
           this.updateAllHandlePositions(next);
         }
 
@@ -246,7 +254,7 @@ export class PolygonEditTool {
 
       const id = this.selectedId;
       const before = this.dragBeforeFeature;
-      const after = this.store.get(id);
+      const afterPositions = this.dragPreviewPositions;
 
       // reset state first
       this.dragMode = "none";
@@ -254,19 +262,29 @@ export class PolygonEditTool {
       this.dragBeforePositions = null;
       this.dragBeforeFeature = null;
       this.dragStartAnchor = null;
+      this.dragPreviewPositions = null;
       this.unlockCamera();
 
-      if (!before || !after) return;
-      const v = validatePolygonPositions(after.geometry.positions);
+      if (!before || !afterPositions) return;
+      const v = validatePolygonPositions(afterPositions);
       if (!v.ok) {
         const msg = v.issues[0]?.message ?? "几何校验失败";
         this.opts.onNotice?.(`编辑提交失败：${msg}`);
-        // revert visual drag by restoring before snapshot
+        // revert preview by restoring before snapshot
         this.store.upsert(before);
         this.refreshHandles();
         return;
       }
-      this.stack.push(new UpdateFeatureCommand(this.store, id, before, snapshotFeature(after)));
+      const after = {
+        ...before,
+        id,
+        kind: "polygon",
+        geometry: { ...before.geometry, positions: clonePositions(afterPositions) },
+        meta: before.meta ? { ...before.meta, updatedAt: Date.now() } : before.meta,
+      } as any;
+      this.stack.push(
+        new UpdateFeatureCommand(this.store, id, before, snapshotFeature(after))
+      );
       this.refreshHandles();
     }, Cesium.ScreenSpaceEventType.LEFT_UP);
 
@@ -590,29 +608,30 @@ export class PolygonEditTool {
     this.lockCamera();
   }
 
-  // ---------- geometry apply ----------
-  private applyVertexMove(index: number, position: Cesium.Cartesian3) {
+  // ---------- geometry preview (Stage 5.4 transaction) ----------
+  private applyVertexMovePreview(index: number, position: Cesium.Cartesian3) {
     if (!this.selectedId) return;
-    const feat = this.store.getPolygon(this.selectedId);
-    if (!feat) return;
-    const positions = clonePositions(feat.geometry.positions);
-    if (index < 0 || index >= positions.length) return;
-    positions[index] = Cesium.Cartesian3.clone(position);
-    this.applyPositions(positions);
+    const base = this.dragPreviewPositions ?? this.dragBeforePositions;
+    if (!base) return;
+    const next = clonePositions(base);
+    if (index < 0 || index >= next.length) return;
+    next[index] = Cesium.Cartesian3.clone(position);
+    this.applyPositionsPreview(next);
     const handle = this.handles[index];
     if (handle) handle.position = Cesium.Cartesian3.clone(position) as any;
   }
 
-  private applyPositions(positions: Cesium.Cartesian3[]) {
+  private applyPositionsPreview(positions: Cesium.Cartesian3[]) {
     if (!this.selectedId) return;
-    const feat = this.store.getPolygon(this.selectedId);
-    if (!feat) return;
-    const next = {
-      ...feat,
-      geometry: { ...feat.geometry, positions: clonePositions(positions) },
-      meta: feat.meta ? { ...feat.meta, updatedAt: Date.now() } : feat.meta,
-    } as any;
-    this.store.upsert(next);
+    this.dragPreviewPositions = clonePositions(positions);
+
+    // Preview by updating the rendered entity directly (no store writes).
+    const entity = this.layer.getEntity(this.selectedId);
+    if (entity?.polygon) {
+      entity.polygon.hierarchy = new Cesium.ConstantProperty(
+        new Cesium.PolygonHierarchy(clonePositions(positions))
+      ) as any;
+    }
   }
 
   // ---------- snapping ----------

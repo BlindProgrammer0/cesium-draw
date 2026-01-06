@@ -1,12 +1,17 @@
 import * as Cesium from "cesium";
 import { PickService } from "./viewer/PickService";
 import { PolygonDrawTool } from "./viewer/PolygonDrawTool";
-import { geojsonFeatureCollectionFromFeatures } from "./features/geojson";
+import {
+  geojsonFeatureCollectionFromFeatures,
+  polygonFeaturesFromGeoJSON,
+} from "./features/geojson";
 import { CommandStack } from "./viewer/commands/CommandStack";
 import { PolygonEditTool } from "./viewer/edit/PolygonEditTool";
 import { EditorSession } from "./editor/EditorSession";
 import { FeatureStore } from "./features/store";
 import { CesiumFeatureLayer } from "./features/CesiumFeatureLayer";
+import { UpsertManyFeaturesCommand } from "./features/commands";
+import { validatePolygonPositions } from "./features/validation";
 
 export function createApp(mountEl: HTMLElement) {
   // Cesium 会在运行时动态请求 Workers/Assets/Widgets 等静态资源。
@@ -50,6 +55,7 @@ export function createApp(mountEl: HTMLElement) {
       <button class="btn" id="btnDeselect">取消选中</button>
       <button class="btn" id="btnExport">导出 GeoJSON</button>
       <button class="btn" id="btnCopy">复制 GeoJSON</button>
+      <button class="btn" id="btnImport">导入 GeoJSON（可 Undo）</button>
     </div>
 
     <div class="row">
@@ -91,7 +97,8 @@ export function createApp(mountEl: HTMLElement) {
       <div>拖拽顶点/平移时，按配置吸附到：顶点/中点/边/网格。优先级：顶点 &gt; 中点 &gt; 边 &gt; 网格。</div>
     </div>
 
-    <textarea class="textarea" id="geojsonOut" spellcheck="false" placeholder="点击“导出 GeoJSON”后，这里会输出 FeatureCollection..."></textarea>
+    <input type="file" id="geojsonFile" accept=".geojson,.json,application/geo+json" style="display:none" />
+    <textarea class="textarea" id="geojsonOut" spellcheck="false" placeholder="点击“导出 GeoJSON”后，这里会输出 FeatureCollection，也可以导入 FeatureCollection/Feature/Polygon/MultiPolygon..."></textarea>
     <div class="hint">提示：撤销加点只作用于绘制中；Undo/Redo 作用于已提交动作（提交/清空/编辑/插点/删点/删除）。</div>
   `;
 
@@ -183,6 +190,39 @@ export function createApp(mountEl: HTMLElement) {
   const btnDeleteVertex = $("btnDeleteVertex") as HTMLButtonElement;
   const geojsonOut = $("geojsonOut") as HTMLTextAreaElement;
 
+  // Stage 5.4: GeoJSON import via hidden file input.
+  const geojsonFile = document.createElement("input");
+  geojsonFile.type = "file";
+  geojsonFile.accept = ".geojson,.json,application/geo+json";
+  geojsonFile.style.display = "none";
+  panel.appendChild(geojsonFile);
+
+  const importGeoJSON = (input: any) => {
+    const features = polygonFeaturesFromGeoJSON(input);
+    if (features.length === 0) {
+      setNotice("导入失败：未找到可导入的 Polygon/MultiPolygon。 ");
+      return;
+    }
+
+    for (const f of features) {
+      const v = validatePolygonPositions(f.geometry.positions);
+      if (!v.ok) {
+        const msg = v.issues[0]?.message ?? "几何校验失败";
+        setNotice(`导入失败（${f.id}）：${msg}`);
+        return;
+      }
+    }
+
+    stack.push(new UpsertManyFeaturesCommand(store, features));
+    setNotice(`已导入 ${features.length} 个多边形（可 Undo）。`);
+    geojsonOut.value = JSON.stringify(
+      geojsonFeatureCollectionFromFeatures(store.all()),
+      null,
+      2
+    );
+  };
+  const btnImport = $("btnImport") as HTMLButtonElement;
+
   const snapEnabled = $("snapEnabled") as HTMLInputElement;
   const snapIndicator = $("snapIndicator") as HTMLInputElement;
   const snapToPolygons = $("snapToPolygons") as HTMLInputElement;
@@ -219,6 +259,52 @@ export function createApp(mountEl: HTMLElement) {
       edit.selectedEntityId && edit.activeVertexIndex !== null
     );
   }
+
+  // ---- GeoJSON import/export ----
+  const exportGeoJSON = () => {
+    const fc = geojsonFeatureCollectionFromFeatures(store.all());
+    geojsonOut.value = JSON.stringify(fc, null, 2);
+    setNotice(`已导出 ${fc.features?.length ?? 0} 个要素。`);
+  };
+
+  const copyGeoJSON = async () => {
+    try {
+      await navigator.clipboard.writeText(geojsonOut.value || "");
+      setNotice("已复制到剪贴板。");
+    } catch {
+      setNotice("复制失败：浏览器未授权剪贴板。可手动全选复制。");
+    }
+  };
+
+  const importGeoJSONText = (text: string) => {
+    let data: any;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      setNotice("导入失败：不是合法 JSON。");
+      return;
+    }
+
+    const feats = polygonFeaturesFromGeoJSON(data);
+    if (!feats.length) {
+      setNotice("导入失败：未识别到 Polygon/MultiPolygon。");
+      return;
+    }
+
+    // Validate all before commit.
+    for (const f of feats) {
+      const v = validatePolygonPositions(f.geometry.positions);
+      if (!v.ok) {
+        const msg = v.issues[0]?.message ?? "几何校验失败";
+        setNotice(`导入失败：${msg}`);
+        return;
+      }
+    }
+
+    stack.push(new UpsertManyFeaturesCommand(store, feats));
+    setNotice(`已导入 ${feats.length} 个要素（可 Undo）。`);
+    refreshStatus();
+  };
 
   snapEnabled.addEventListener("change", () =>
     edit.setSnapEnabled(snapEnabled.checked)
@@ -314,6 +400,32 @@ export function createApp(mountEl: HTMLElement) {
   });
 
   $("btnDeselect").addEventListener("click", () => session.deselect());
+
+  // Stage 5.4: Import GeoJSON.
+  btnImport.addEventListener("click", () => {
+    const text = geojsonOut.value.trim();
+    if (text) {
+      try {
+        importGeoJSON(JSON.parse(text));
+        return;
+      } catch {
+        // fall through to file chooser
+      }
+    }
+    geojsonFile.value = "";
+    geojsonFile.click();
+  });
+
+  geojsonFile.addEventListener("change", async () => {
+    const file = geojsonFile.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      importGeoJSON(JSON.parse(text));
+    } catch {
+      setNotice("导入失败：文件不是有效 JSON/GeoJSON。 ");
+    }
+  });
 
   $("btnExport").addEventListener("click", () => {
     geojsonOut.value = JSON.stringify(
