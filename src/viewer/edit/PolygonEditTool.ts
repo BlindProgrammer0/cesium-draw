@@ -7,6 +7,10 @@ import {
   snapshotPolygonEntity,
   clonePositions,
 } from "../commands/EntityCommands";
+import { SnappingEngine } from "../snap/SnappingEngine";
+import { SnapIndicator } from "../snap/SnapIndicator";
+import type { SnapSourcesEnabled, SnapTypesEnabled } from "../snap/SnapTypes";
+import { defaultSnapSources, defaultSnapTypes } from "../snap/SnapTypes";
 
 type Listener = () => void;
 type DragMode = "none" | "vertex" | "translate";
@@ -36,6 +40,13 @@ export class PolygonEditTool {
   private snapEnabled = true;
   private snapThresholdPx = 12;
 
+  private snapTypes: SnapTypesEnabled = defaultSnapTypes();
+  private snapSources: SnapSourcesEnabled = defaultSnapSources();
+  private gridSizeMeters = 5;
+
+  private readonly snapping: SnappingEngine;
+  private readonly snapIndicator: SnapIndicator;
+
   private readonly camera = this.viewer?.scene
     ?.screenSpaceCameraController as any; // only for field init safety
 
@@ -47,6 +58,10 @@ export class PolygonEditTool {
     private readonly isDrawing: () => boolean
   ) {
     this.handler = new Cesium.ScreenSpaceEventHandler(this.viewer.canvas);
+
+    this.snapping = new SnappingEngine(this.viewer, this.ds);
+    this.snapIndicator = new SnapIndicator(this.viewer);
+    this.applySnapConfig();
 
     // 1) Ctrl + LeftDown：插入点（稳定，不依赖 LEFT_CLICK）
     this.handler.setInputAction(
@@ -68,13 +83,22 @@ export class PolygonEditTool {
     this.handler.setInputAction((movement: any) => {
       if (this.isDrawing()) return;
 
+      if (this.dragMode === "none") {
+        this.snapIndicator.hide();
+      }
+
       const entity = this.pick.pickEntity(movement.position);
       if (!entity) {
         this.deselect();
         return;
       }
 
+      // Ignore snap indicator entities.
+      const ignoreProps = this.getProps(entity);
+      if (ignoreProps?.__type === "snap-indicator") return;
+
       const props = this.getProps(entity);
+      if (props?.__type === "snap-indicator") return;
       if (props?.__type === "handle") {
         this.beginVertexDrag(movement.position, props);
         return;
@@ -99,6 +123,9 @@ export class PolygonEditTool {
 
         const entity = this.pick.pickEntity(movement.position);
         if (!entity) return;
+
+        const ignoreProps = this.getProps(entity);
+        if (ignoreProps?.__type === "snap-indicator") return;
 
         const id = String(entity.id);
         const local = this.ds.entities.getById(id);
@@ -134,9 +161,9 @@ export class PolygonEditTool {
         if (!p) return;
 
         const snapped = this.snapEnabled
-          ? this.snapCartesian(p, movement.endPosition, {
+          ? this.snapWithEngine(p, movement.endPosition, {
+              // do not snap to the polygon being edited
               excludeOwnerId: this.selectedId,
-              excludeIndex: this.dragIndex,
             })
           : p;
 
@@ -159,7 +186,7 @@ export class PolygonEditTool {
         );
 
         if (this.snapEnabled) {
-          const snappedAnchor = this.snapCartesian(cur, movement.endPosition, {
+          const snappedAnchor = this.snapWithEngine(cur, movement.endPosition, {
             excludeOwnerId: this.selectedId,
           });
           delta = Cesium.Cartesian3.subtract(
@@ -175,6 +202,22 @@ export class PolygonEditTool {
 
         this.applyPositions(next);
         this.updateAllHandlePositions(next); // 增量更新 handle，不重建
+      }
+
+      // When idle, still update snap indicator for better GIS-like feedback.
+      if (this.snapEnabled && this.selectedId) {
+        const w = this.pick.pickPosition(movement.endPosition);
+        if (!w) {
+          this.snapIndicator.hide();
+          return;
+        }
+        const res = this.snapping.snap(w, movement.endPosition, {
+          excludeOwnerId: this.selectedId,
+        });
+        if (res) this.snapIndicator.show(res.candidate, w);
+        else this.snapIndicator.hide();
+      } else {
+        this.snapIndicator.hide();
       }
     }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
@@ -226,6 +269,7 @@ export class PolygonEditTool {
 
   destroy() {
     this.handler?.destroy();
+    this.snapIndicator?.destroy();
     // 需要时可移除 keydown 监听（这里略）
   }
 
@@ -245,15 +289,46 @@ export class PolygonEditTool {
 
   setSnapEnabled(v: boolean) {
     this.snapEnabled = v;
+    if (!v) this.snapIndicator.hide();
   }
   setSnapThresholdPx(v: number) {
     this.snapThresholdPx = Math.max(1, Math.min(64, Math.floor(v)));
+    this.applySnapConfig();
   }
   getSnapEnabled() {
     return this.snapEnabled;
   }
   getSnapThresholdPx() {
     return this.snapThresholdPx;
+  }
+
+  setSnapTypes(next: Partial<SnapTypesEnabled>) {
+    this.snapTypes = { ...this.snapTypes, ...next } as any;
+    this.applySnapConfig();
+  }
+  getSnapTypes() {
+    return { ...this.snapTypes };
+  }
+  setSnapSources(next: Partial<SnapSourcesEnabled>) {
+    this.snapSources = { ...this.snapSources, ...next } as any;
+    this.applySnapConfig();
+  }
+  getSnapSources() {
+    return { ...this.snapSources };
+  }
+  setGridSizeMeters(v: number) {
+    this.gridSizeMeters = Math.max(0.1, Math.min(5000, v));
+    this.applySnapConfig();
+  }
+  getGridSizeMeters() {
+    return this.gridSizeMeters;
+  }
+
+  setSnapIndicatorEnabled(v: boolean) {
+    this.snapIndicator.setEnabled(v);
+  }
+  getSnapIndicatorEnabled() {
+    return this.snapIndicator.getEnabled();
   }
 
   // ---------- selection ----------
@@ -265,6 +340,7 @@ export class PolygonEditTool {
     }
 
     const props = this.getProps(entity);
+    if (props?.__type === "snap-indicator") return;
     if (props?.__type === "handle") {
       const ownerId = String(props.__ownerId);
       const idx = Number(props.__index);
@@ -329,6 +405,7 @@ export class PolygonEditTool {
     this.selectedId = null;
     this.activeHandleIndex = null;
     this.clearHandles();
+    this.snapIndicator.hide();
     if (emit) this.emit();
   }
 
@@ -516,47 +593,29 @@ export class PolygonEditTool {
     ) as any;
   }
 
-  // ---------- snapping ----------
-  private snapCartesian(
+  // ---------- snapping (stage 4) ----------
+  private applySnapConfig() {
+    this.snapping.configure({
+      thresholdPx: this.snapThresholdPx,
+      types: this.snapTypes,
+      sources: this.snapSources,
+      gridSizeMeters: this.gridSizeMeters,
+    });
+  }
+
+  private snapWithEngine(
     candidate: Cesium.Cartesian3,
     cursorScreenPos: Cesium.Cartesian2,
-    opts?: { excludeOwnerId?: string; excludeIndex?: number }
+    query?: { excludeOwnerId?: string }
   ): Cesium.Cartesian3 {
-    const scene = this.viewer.scene;
-    let best: { pos: Cesium.Cartesian3; distPx: number } | null = null;
-
-    for (const e of this.ds.entities.values) {
-      if (!e.polygon) continue;
-
-      const id = String(e.id);
-      const hierarchy = e.polygon.hierarchy?.getValue(
-        Cesium.JulianDate.now()
-      ) as Cesium.PolygonHierarchy | undefined;
-      const positions = hierarchy?.positions;
-      if (!positions?.length) continue;
-
-      for (let i = 0; i < positions.length; i++) {
-        if (
-          opts?.excludeOwnerId &&
-          id === opts.excludeOwnerId &&
-          opts.excludeIndex === i
-        )
-          continue;
-
-        const sp = scene.cartesianToCanvasCoordinates(positions[i]);
-        if (!sp) continue;
-
-        const d = Math.hypot(
-          sp.x - cursorScreenPos.x,
-          sp.y - cursorScreenPos.y
-        );
-        if (d <= this.snapThresholdPx && (!best || d < best.distPx)) {
-          best = { pos: Cesium.Cartesian3.clone(positions[i]), distPx: d };
-        }
-      }
+    this.applySnapConfig();
+    const res = this.snapping.snap(candidate, cursorScreenPos, query);
+    if (res) {
+      this.snapIndicator.show(res.candidate, candidate);
+      return Cesium.Cartesian3.clone(res.candidate.position);
     }
-
-    return best ? best.pos : candidate;
+    this.snapIndicator.hide();
+    return candidate;
   }
 
   // ---------- edge insertion ----------

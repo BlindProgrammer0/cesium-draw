@@ -6,7 +6,10 @@ import { CommandStack } from "./viewer/commands/CommandStack";
 import { PolygonEditTool } from "./viewer/edit/PolygonEditTool";
 
 export function createApp(mountEl: HTMLElement) {
-  (window as any).CESIUM_BASE_URL = "/cesium/";
+  // Cesium 会在运行时动态请求 Workers/Assets/Widgets 等静态资源。
+  // 资源由 vite-plugin-static-copy 拷贝到 {base}/cesium 下，因此这里必须与 Vite 的 base 保持一致。
+  const base = (import.meta as any).env?.BASE_URL ?? "/";
+  (window as any).CESIUM_BASE_URL = `${base}cesium/`;
 
   const root = document.createElement("div");
   root.id = "root";
@@ -17,7 +20,7 @@ export function createApp(mountEl: HTMLElement) {
   const panel = document.createElement("div");
   panel.className = "panel";
   panel.innerHTML = `
-    <h1>阶段 3：插入点/删单点/整体平移/吸附阈值（全部可 Undo/Redo）</h1>
+    <h1>阶段 4：GIS 吸附编辑（顶点/中点/边/网格 + 吸附源 + 优先级 + 可视化提示，全部可 Undo/Redo）</h1>
 
     <div class="row">
       <span class="badge"><span class="dot off" id="stateDot"></span><span id="stateText">idle</span></span>
@@ -46,14 +49,27 @@ export function createApp(mountEl: HTMLElement) {
     </div>
 
     <div class="row">
-      <label class="field">
-        <input type="checkbox" id="snapEnabled" checked />
-        吸附
-      </label>
+      <label class="field"><input type="checkbox" id="snapEnabled" checked /> 吸附</label>
+      <label class="field"><input type="checkbox" id="snapIndicator" checked /> 提示</label>
+      <label class="field"><input type="checkbox" id="snapToPolygons" checked /> 其他要素</label>
+      <label class="field"><input type="checkbox" id="snapToGrid" /> 网格</label>
+    </div>
+
+    <div class="row">
+      <label class="field"><input type="checkbox" id="snapTypeVertex" checked /> 顶点</label>
+      <label class="field"><input type="checkbox" id="snapTypeMid" checked /> 中点</label>
+      <label class="field"><input type="checkbox" id="snapTypeEdge" checked /> 边</label>
+      <label class="field"><input type="checkbox" id="snapTypeGrid" /> 网格点</label>
+
       <label class="field">
         阈值(px)
         <input type="range" id="snapThreshold" min="4" max="32" value="12" />
         <code id="snapThresholdVal">12</code>
+      </label>
+      <label class="field">
+        网格(m)
+        <input type="range" id="gridSize" min="1" max="50" value="5" />
+        <code id="gridSizeVal">5</code>
       </label>
     </div>
 
@@ -68,7 +84,7 @@ export function createApp(mountEl: HTMLElement) {
       <div>按住 <b>Shift</b> 并拖拽 Polygon，可整体平移（支持吸附与 Undo/Redo）。</div>
 
       <div><b>吸附</b></div>
-      <div>拖拽顶点/平移时，若鼠标附近有其他顶点（像素距离 &le; 阈值），会吸附到该顶点。</div>
+      <div>拖拽顶点/平移时，按配置吸附到：顶点/中点/边/网格。优先级：顶点 &gt; 中点 &gt; 边 &gt; 网格。</div>
     </div>
 
     <textarea class="textarea" id="geojsonOut" spellcheck="false" placeholder="点击“导出 GeoJSON”后，这里会输出 FeatureCollection..."></textarea>
@@ -146,8 +162,20 @@ export function createApp(mountEl: HTMLElement) {
   const geojsonOut = $("geojsonOut") as HTMLTextAreaElement;
 
   const snapEnabled = $("snapEnabled") as HTMLInputElement;
+  const snapIndicator = $("snapIndicator") as HTMLInputElement;
+  const snapToPolygons = $("snapToPolygons") as HTMLInputElement;
+  const snapToGrid = $("snapToGrid") as HTMLInputElement;
+
+  const snapTypeVertex = $("snapTypeVertex") as HTMLInputElement;
+  const snapTypeMid = $("snapTypeMid") as HTMLInputElement;
+  const snapTypeEdge = $("snapTypeEdge") as HTMLInputElement;
+  const snapTypeGrid = $("snapTypeGrid") as HTMLInputElement;
+
   const snapThreshold = $("snapThreshold") as HTMLInputElement;
   const snapThresholdVal = $("snapThresholdVal");
+
+  const gridSize = $("gridSize") as HTMLInputElement;
+  const gridSizeVal = $("gridSizeVal");
 
   function refreshStatus() {
     stateText.textContent = draw.state;
@@ -172,13 +200,64 @@ export function createApp(mountEl: HTMLElement) {
   snapEnabled.addEventListener("change", () =>
     edit.setSnapEnabled(snapEnabled.checked)
   );
+
+  snapIndicator.addEventListener("change", () =>
+    edit.setSnapIndicatorEnabled(snapIndicator.checked)
+  );
+
+  snapToPolygons.addEventListener("change", () =>
+    edit.setSnapSources({ polygons: snapToPolygons.checked })
+  );
+
+  snapToGrid.addEventListener("change", () => {
+    edit.setSnapSources({ grid: snapToGrid.checked });
+    edit.setSnapTypes({ grid: snapToGrid.checked });
+    snapTypeGrid.checked = snapToGrid.checked;
+  });
+
+  function applySnapTypesFromUI() {
+    edit.setSnapTypes({
+      vertex: snapTypeVertex.checked,
+      midpoint: snapTypeMid.checked,
+      edge: snapTypeEdge.checked,
+      grid: snapTypeGrid.checked,
+    });
+  }
+  snapTypeVertex.addEventListener("change", applySnapTypesFromUI);
+  snapTypeMid.addEventListener("change", applySnapTypesFromUI);
+  snapTypeEdge.addEventListener("change", applySnapTypesFromUI);
+  snapTypeGrid.addEventListener("change", () => {
+    // Grid type implies grid source
+    const v = snapTypeGrid.checked;
+    edit.setSnapSources({ grid: v });
+    snapToGrid.checked = v;
+    applySnapTypesFromUI();
+  });
+
   snapThreshold.addEventListener("input", () => {
     const v = Number(snapThreshold.value);
     snapThresholdVal.textContent = String(v);
     edit.setSnapThresholdPx(v);
   });
-  edit.setSnapEnabled(true);
+
+  gridSize.addEventListener("input", () => {
+    const v = Number(gridSize.value);
+    gridSizeVal.textContent = String(v);
+    edit.setGridSizeMeters(v);
+  });
+
+  // Initial sync from UI
+  edit.setSnapEnabled(snapEnabled.checked);
+  edit.setSnapIndicatorEnabled(snapIndicator.checked);
+  edit.setSnapSources({ polygons: snapToPolygons.checked, grid: snapToGrid.checked });
+  edit.setSnapTypes({
+    vertex: snapTypeVertex.checked,
+    midpoint: snapTypeMid.checked,
+    edge: snapTypeEdge.checked,
+    grid: snapTypeGrid.checked,
+  });
   edit.setSnapThresholdPx(Number(snapThreshold.value));
+  edit.setGridSizeMeters(Number(gridSize.value));
 
   draw.onStateChange(refreshStatus);
   draw.onPointChange(refreshStatus);
