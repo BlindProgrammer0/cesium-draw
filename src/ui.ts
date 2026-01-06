@@ -1,10 +1,12 @@
 import * as Cesium from "cesium";
 import { PickService } from "./viewer/PickService";
 import { PolygonDrawTool } from "./viewer/PolygonDrawTool";
-import { geojsonFeatureCollectionFromEntities } from "./viewer/geojson";
+import { geojsonFeatureCollectionFromFeatures } from "./features/geojson";
 import { CommandStack } from "./viewer/commands/CommandStack";
 import { PolygonEditTool } from "./viewer/edit/PolygonEditTool";
 import { EditorSession } from "./editor/EditorSession";
+import { FeatureStore } from "./features/store";
+import { CesiumFeatureLayer } from "./features/CesiumFeatureLayer";
 
 export function createApp(mountEl: HTMLElement) {
   // Cesium 会在运行时动态请求 Workers/Assets/Widgets 等静态资源。
@@ -131,7 +133,16 @@ export function createApp(mountEl: HTMLElement) {
 
   const stack = new CommandStack();
 
-  const draw = new PolygonDrawTool(viewer, pick, stack, {
+  // Stage 5.2: Feature model is the single source of truth.
+  const store = new FeatureStore();
+  const featureLayer = new CesiumFeatureLayer(viewer, store, {
+    material: new Cesium.ColorMaterialProperty(
+      Cesium.Color.CYAN.withAlpha(0.25)
+    ),
+    outlineColor: Cesium.Color.CYAN,
+  });
+
+  const draw = new PolygonDrawTool(viewer, pick, stack, store, {
     polygonMaterial: new Cesium.ColorMaterialProperty(
       Cesium.Color.CYAN.withAlpha(0.25)
     ),
@@ -139,13 +150,7 @@ export function createApp(mountEl: HTMLElement) {
     pointColor: Cesium.Color.YELLOW.withAlpha(0.95),
   });
 
-  const edit = new PolygonEditTool(
-    viewer,
-    draw.ds,
-    pick,
-    stack,
-    () => draw.state === "drawing"
-  );
+  const edit = new PolygonEditTool(viewer, featureLayer, store, pick, stack, () => draw.state === "drawing");
 
   // Stage 5.1: Use a single session as the orchestration boundary.
   const session = new EditorSession(draw, edit, pick, stack);
@@ -299,7 +304,7 @@ export function createApp(mountEl: HTMLElement) {
 
   $("btnExport").addEventListener("click", () => {
     geojsonOut.value = JSON.stringify(
-      geojsonFeatureCollectionFromEntities(draw.getCommittedEntities()),
+      geojsonFeatureCollectionFromFeatures(store.all()),
       null,
       2
     );

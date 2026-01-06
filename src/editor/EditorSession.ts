@@ -32,12 +32,6 @@ export class EditorSession {
     });
 
     this.draw.onCommittedChange(() => {
-      // If selected entity was removed, clear selection.
-      const id = this.edit.selectedEntityId;
-      if (id && !this.draw.ds.entities.getById(id)) {
-        this.edit.deselect();
-        this.dispatch({ type: "DESELECT" });
-      }
       this.dispatch({ type: "COMMITTED_CHANGED" });
     });
 

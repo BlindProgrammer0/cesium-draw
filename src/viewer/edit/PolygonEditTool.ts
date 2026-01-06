@@ -1,12 +1,14 @@
 import * as Cesium from "cesium";
+import type { CesiumFeatureLayer } from "../../features/CesiumFeatureLayer";
+import type { FeatureStore } from "../../features/store";
+import { clonePositions } from "../../features/types";
+import {
+  RemoveFeatureCommand,
+  UpdateFeatureCommand,
+  snapshotFeature,
+} from "../../features/commands";
 import { PickService } from "../PickService";
 import type { CommandStack } from "../commands/CommandStack";
-import {
-  RemovePolygonCommand,
-  UpdatePolygonCommand,
-  snapshotPolygonEntity,
-  clonePositions,
-} from "../commands/EntityCommands";
 import { SnappingEngine } from "../snap/SnappingEngine";
 import { SnapIndicator } from "../snap/SnapIndicator";
 import type { SnapSourcesEnabled, SnapTypesEnabled } from "../snap/SnapTypes";
@@ -25,13 +27,15 @@ export class PolygonEditTool {
 
   private selectedId: string | null = null;
 
+  private overlayDs: Cesium.CustomDataSource;
   private handles: Cesium.Entity[] = [];
   private activeHandleIndex: number | null = null;
 
   private dragMode: DragMode = "none";
   private dragIndex: number | null = null;
 
-  private dragBefore: Cesium.Cartesian3[] | null = null;
+  private dragBeforePositions: Cesium.Cartesian3[] | null = null;
+  private dragBeforeFeature: any | null = null;
   private dragStartAnchor: Cesium.Cartesian3 | null = null;
 
   private originalStyle = new Map<string, StyleSnapshot>();
@@ -47,23 +51,38 @@ export class PolygonEditTool {
   private readonly snapping: SnappingEngine;
   private readonly snapIndicator: SnapIndicator;
 
-  private readonly camera = this.viewer?.scene
-    ?.screenSpaceCameraController as any; // only for field init safety
-
   constructor(
     private readonly viewer: Cesium.Viewer,
-    private readonly ds: Cesium.CustomDataSource,
+    private readonly layer: CesiumFeatureLayer,
+    private readonly store: FeatureStore,
     private readonly pick: PickService,
     private readonly stack: CommandStack,
     private readonly isDrawing: () => boolean
   ) {
     this.handler = new Cesium.ScreenSpaceEventHandler(this.viewer.canvas);
+    this.overlayDs = new Cesium.CustomDataSource("edit-overlay");
+    this.viewer.dataSources.add(this.overlayDs);
 
-    this.snapping = new SnappingEngine(this.viewer, this.ds);
+    this.snapping = new SnappingEngine(this.viewer, this.layer.ds);
     this.snapIndicator = new SnapIndicator(this.viewer);
     this.applySnapConfig();
 
-    // 1) Ctrl + LeftDown：插入点（稳定，不依赖 LEFT_CLICK）
+    // keep handles in sync on undo/redo via store events
+    this.store.onChange((evt) => {
+      if (!this.selectedId) return;
+      if (evt.type === "upsert" && evt.feature.id === this.selectedId) {
+        this.refreshHandles();
+        this.emit();
+      }
+      if (evt.type === "remove" && evt.id === this.selectedId) {
+        this.deselect();
+      }
+      if (evt.type === "clear") {
+        this.deselect();
+      }
+    });
+
+    // 1) Ctrl + LeftDown：插入点
     this.handler.setInputAction(
       (movement: any) => {
         if (this.isDrawing()) return;
@@ -72,78 +91,67 @@ export class PolygonEditTool {
         const inserted = this.tryInsertPoint(movement.position);
         if (inserted) return;
 
-        // 若未插入成功，继续走普通选中逻辑：这里不做 return
+        // fallback to pick/select
         this.pickAndSelect(movement.position);
       },
       Cesium.ScreenSpaceEventType.LEFT_DOWN,
       Cesium.KeyboardEventModifier.CTRL
     );
 
-    // 2) 普通 LeftDown：选中 / 开始拖拽（顶点 or 平移）
-    this.handler.setInputAction((movement: any) => {
-      if (this.isDrawing()) return;
-
-      if (this.dragMode === "none") {
-        this.snapIndicator.hide();
-      }
-
-      const entity = this.pick.pickEntity(movement.position);
-      if (!entity) {
-        this.deselect();
-        return;
-      }
-
-      // Ignore snap indicator entities.
-      const ignoreProps = this.getProps(entity);
-      if (ignoreProps?.__type === "snap-indicator") return;
-
-      const props = this.getProps(entity);
-      if (props?.__type === "snap-indicator") return;
-      if (props?.__type === "handle") {
-        this.beginVertexDrag(movement.position, props);
-        return;
-      }
-
-      // Shift + drag on polygon：整体平移
-      // 注意：这里依赖 movement.shiftKey 不可靠，所以改成用 modifier 方式注册一个 SHIFT 分支
-      // 普通分支只负责选中
-      const id = String(entity.id);
-      const local = this.ds.entities.getById(id);
-      if (!local?.polygon) {
-        this.deselect();
-        return;
-      }
-      this.select(id);
-    }, Cesium.ScreenSpaceEventType.LEFT_DOWN);
-
-    // 2.1) Shift + LeftDown：开始整体平移（用 modifier 可靠过滤）
+    // 2) 普通 LeftDown：选中 / 开始拖拽（顶点）
     this.handler.setInputAction(
       (movement: any) => {
         if (this.isDrawing()) return;
 
+        if (this.dragMode === "none") this.snapIndicator.hide();
+
         const entity = this.pick.pickEntity(movement.position);
-        if (!entity) return;
+        if (!entity) {
+          this.deselect();
+          return;
+        }
 
-        const ignoreProps = this.getProps(entity);
-        if (ignoreProps?.__type === "snap-indicator") return;
+        const props = this.getProps(entity);
+        if (props?.__type === "snap-indicator") return;
 
-        const id = String(entity.id);
-        const local = this.ds.entities.getById(id);
-        if (!local?.polygon) return;
+        if (props?.__type === "handle") {
+          this.beginVertexDrag(movement.position, props);
+          return;
+        }
 
-        if (this.selectedId !== id) this.select(id);
+        // committed polygon
+        const fid = props?.__featureId;
+        if (typeof fid === "string") {
+          this.select(fid);
+          return;
+        }
 
-        const snap = snapshotPolygonEntity(local);
-        if (!snap) return;
+        this.deselect();
+      },
+      Cesium.ScreenSpaceEventType.LEFT_DOWN
+    );
+
+    // 2.1) Shift + LeftDown：开始整体平移
+    this.handler.setInputAction(
+      (movement: any) => {
+        if (this.isDrawing()) return;
+
+        const fid = this.pick.pickFeatureId(movement.position);
+        if (!fid) return;
+
+        if (this.selectedId !== fid) this.select(fid);
+
+        const feat = this.store.getPolygon(fid);
+        if (!feat) return;
 
         const anchor = this.pick.pickPosition(movement.position);
         if (!anchor) return;
 
         this.dragMode = "translate";
         this.dragIndex = null;
-        this.dragBefore = clonePositions(snap.positions);
+        this.dragBeforePositions = clonePositions(feat.geometry.positions);
+        this.dragBeforeFeature = snapshotFeature(feat);
         this.dragStartAnchor = Cesium.Cartesian3.clone(anchor);
-
         this.lockCamera();
       },
       Cesium.ScreenSpaceEventType.LEFT_DOWN,
@@ -151,110 +159,101 @@ export class PolygonEditTool {
     );
 
     // 3) MouseMove：拖拽更新
-    this.handler.setInputAction((movement: any) => {
-      if (this.isDrawing()) return;
+    this.handler.setInputAction(
+      (movement: any) => {
+        if (this.isDrawing()) return;
 
-      if (this.dragMode === "vertex") {
-        if (this.dragIndex === null || !this.selectedId) return;
+        if (this.dragMode === "vertex") {
+          if (this.dragIndex === null || !this.selectedId) return;
 
-        const p = this.pick.pickPosition(movement.endPosition);
-        if (!p) return;
+          const p = this.pick.pickPosition(movement.endPosition);
+          if (!p) return;
 
-        const snapped = this.snapEnabled
-          ? this.snapWithEngine(p, movement.endPosition, {
-              // do not snap to the polygon being edited
-              excludeOwnerId: this.selectedId,
-            })
-          : p;
+          const snapped = this.snapEnabled
+            ? this.snapWithEngine(p, movement.endPosition, {
+                excludeOwnerId: this.selectedId,
+                excludeIndex: this.dragIndex,
+              })
+            : p;
 
-        // 仅更新一个顶点 + 对应 handle（不全量 refresh）
-        this.applyVertexMove(this.dragIndex, snapped);
-        return;
-      }
-
-      if (this.dragMode === "translate") {
-        if (!this.selectedId || !this.dragStartAnchor || !this.dragBefore)
+          this.applyVertexMove(this.dragIndex, snapped);
           return;
+        }
 
-        const cur = this.pick.pickPosition(movement.endPosition);
-        if (!cur) return;
+        if (this.dragMode === "translate") {
+          if (
+            !this.selectedId ||
+            !this.dragStartAnchor ||
+            !this.dragBeforePositions
+          )
+            return;
 
-        let delta = Cesium.Cartesian3.subtract(
-          cur,
-          this.dragStartAnchor,
-          new Cesium.Cartesian3()
-        );
+          const cur = this.pick.pickPosition(movement.endPosition);
+          if (!cur) return;
 
-        if (this.snapEnabled) {
-          const snappedAnchor = this.snapWithEngine(cur, movement.endPosition, {
+          let delta = Cesium.Cartesian3.subtract(
+            cur,
+            this.dragStartAnchor,
+            new Cesium.Cartesian3()
+          );
+
+          if (this.snapEnabled) {
+            const snappedAnchor = this.snapWithEngine(cur, movement.endPosition, {
+              excludeOwnerId: this.selectedId,
+            });
+            delta = Cesium.Cartesian3.subtract(
+              snappedAnchor,
+              this.dragStartAnchor,
+              delta
+            );
+          }
+
+          const next = this.dragBeforePositions.map((p0) =>
+            Cesium.Cartesian3.add(p0, delta, new Cesium.Cartesian3())
+          );
+
+          this.applyPositions(next);
+          this.updateAllHandlePositions(next);
+        }
+
+        // idle: show snap indicator
+        if (this.snapEnabled && this.selectedId) {
+          const w = this.pick.pickPosition(movement.endPosition);
+          if (!w) {
+            this.snapIndicator.hide();
+            return;
+          }
+          const res = this.snapping.snap(w, movement.endPosition, {
             excludeOwnerId: this.selectedId,
           });
-          delta = Cesium.Cartesian3.subtract(
-            snappedAnchor,
-            this.dragStartAnchor,
-            delta
-          );
-        }
-
-        const next = this.dragBefore.map((p0) =>
-          Cesium.Cartesian3.add(p0, delta, new Cesium.Cartesian3())
-        );
-
-        this.applyPositions(next);
-        this.updateAllHandlePositions(next); // 增量更新 handle，不重建
-      }
-
-      // When idle, still update snap indicator for better GIS-like feedback.
-      if (this.snapEnabled && this.selectedId) {
-        const w = this.pick.pickPosition(movement.endPosition);
-        if (!w) {
+          if (res) this.snapIndicator.show(res.candidate, w);
+          else this.snapIndicator.hide();
+        } else {
           this.snapIndicator.hide();
-          return;
         }
-        const res = this.snapping.snap(w, movement.endPosition, {
-          excludeOwnerId: this.selectedId,
-        });
-        if (res) this.snapIndicator.show(res.candidate, w);
-        else this.snapIndicator.hide();
-      } else {
-        this.snapIndicator.hide();
-      }
-    }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+      },
+      Cesium.ScreenSpaceEventType.MOUSE_MOVE
+    );
 
     // 4) LeftUp：提交命令（如果发生拖拽）
     this.handler.setInputAction(() => {
       if (this.dragMode === "none" || !this.selectedId) return;
 
-      const poly = this.ds.entities.getById(this.selectedId);
-      const afterSnap = poly ? snapshotPolygonEntity(poly) : null;
-      const beforePositions = this.dragBefore;
+      const id = this.selectedId;
+      const before = this.dragBeforeFeature;
+      const after = this.store.get(id);
 
-      // 先收敛状态（确保不会残留）
+      // reset state first
       this.dragMode = "none";
       this.dragIndex = null;
-      this.dragBefore = null;
+      this.dragBeforePositions = null;
+      this.dragBeforeFeature = null;
       this.dragStartAnchor = null;
       this.unlockCamera();
 
-      if (!poly || !afterSnap || !beforePositions) return;
-
-      const beforeSnap = {
-        ...afterSnap,
-        positions: clonePositions(beforePositions),
-      };
-
-      this.stack.push(
-        new UpdatePolygonCommand(
-          this.ds,
-          this.selectedId,
-          beforeSnap,
-          afterSnap,
-          () => {
-            // 拖拽结束后再全量 refresh 一次，保证 handles 与 hierarchy 同步
-            this.refreshHandles();
-          }
-        )
-      );
+      if (!before || !after) return;
+      this.stack.push(new UpdateFeatureCommand(this.store, id, before, snapshotFeature(after)));
+      this.refreshHandles();
     }, Cesium.ScreenSpaceEventType.LEFT_UP);
 
     window.addEventListener("keydown", (e) => {
@@ -270,7 +269,6 @@ export class PolygonEditTool {
   destroy() {
     this.handler?.destroy();
     this.snapIndicator?.destroy();
-    // 需要时可移除 keydown 监听（这里略）
   }
 
   onChange(fn: Listener) {
@@ -352,13 +350,13 @@ export class PolygonEditTool {
       return;
     }
 
-    const id = String(entity.id);
-    const local = this.ds.entities.getById(id);
-    if (!local?.polygon) {
-      this.deselect();
+    const fid = props?.__featureId;
+    if (typeof fid === "string") {
+      this.select(fid);
       return;
     }
-    this.select(id);
+
+    this.deselect();
   }
 
   select(id: string) {
@@ -366,7 +364,7 @@ export class PolygonEditTool {
 
     this.deselect(false);
 
-    const e = this.ds.entities.getById(id);
+    const e = this.layer.getEntity(id);
     if (!e?.polygon) {
       this.selectedId = null;
       this.emit();
@@ -395,7 +393,7 @@ export class PolygonEditTool {
 
   deselect(emit = true) {
     if (this.selectedId) {
-      const e = this.ds.entities.getById(this.selectedId);
+      const e = this.layer.getEntity(this.selectedId);
       const st = this.originalStyle.get(this.selectedId);
       if (e?.polygon && st) {
         if (st.material) e.polygon.material = st.material;
@@ -414,36 +412,38 @@ export class PolygonEditTool {
     if (!this.selectedId) return;
     const id = this.selectedId;
     this.deselect(false);
-    this.stack.push(new RemovePolygonCommand(this.ds, id));
+    this.stack.push(new RemoveFeatureCommand(this.store, id));
     this.emit();
   }
 
   deleteActiveVertex() {
     if (!this.selectedId || this.activeHandleIndex === null) return;
 
-    const e = this.ds.entities.getById(this.selectedId);
-    const snap = e ? snapshotPolygonEntity(e) : null;
-    if (!snap) return;
+    const feat = this.store.getPolygon(this.selectedId);
+    if (!feat) return;
 
-    if (snap.positions.length <= 3) {
+    if (feat.geometry.positions.length <= 3) {
       alert("Polygon 至少需要 3 个顶点。");
       return;
     }
 
-    const before = snap;
-    const nextPositions = clonePositions(snap.positions).filter(
+    const before = snapshotFeature(feat);
+    const nextPositions = clonePositions(feat.geometry.positions).filter(
       (_, i) => i !== this.activeHandleIndex
     );
-    const after = { ...snap, positions: nextPositions };
+    const after = {
+      ...feat,
+      geometry: { ...feat.geometry, positions: nextPositions },
+      meta: feat.meta ? { ...feat.meta, updatedAt: Date.now() } : feat.meta,
+    } as any;
 
-    this.applyPositions(after.positions);
+    // apply live then commit cmd
+    this.store.upsert(after);
     this.activeHandleIndex = null;
-
     this.stack.push(
-      new UpdatePolygonCommand(this.ds, this.selectedId, before, after, () =>
-        this.refreshHandles()
-      )
+      new UpdateFeatureCommand(this.store, this.selectedId, before, snapshotFeature(after))
     );
+    this.refreshHandles();
     this.emit();
   }
 
@@ -451,33 +451,34 @@ export class PolygonEditTool {
   tryInsertPoint(screenPos: Cesium.Cartesian2): boolean {
     if (!this.selectedId) return false;
 
-    const e = this.ds.entities.getById(this.selectedId);
-    const snap = e ? snapshotPolygonEntity(e) : null;
-    if (!snap) return false;
+    const feat = this.store.getPolygon(this.selectedId);
+    if (!feat) return false;
 
     const picked = this.pick.pickPosition(screenPos);
     if (!picked) return false;
 
     const { ok, insertIndex, projected } = this.findClosestEdgeInsertion(
-      snap.positions,
+      feat.geometry.positions,
       picked,
       screenPos
     );
     if (!ok || insertIndex === null || !projected) return false;
 
-    const before = snap;
-    const next = clonePositions(snap.positions);
+    const before = snapshotFeature(feat);
+    const next = clonePositions(feat.geometry.positions);
     next.splice(insertIndex, 0, projected);
-    const after = { ...snap, positions: next };
+    const after = {
+      ...feat,
+      geometry: { ...feat.geometry, positions: next },
+      meta: feat.meta ? { ...feat.meta, updatedAt: Date.now() } : feat.meta,
+    } as any;
 
-    this.applyPositions(after.positions);
+    this.store.upsert(after);
     this.setActiveHandle(insertIndex);
-
     this.stack.push(
-      new UpdatePolygonCommand(this.ds, this.selectedId, before, after, () =>
-        this.refreshHandles()
-      )
+      new UpdateFeatureCommand(this.store, this.selectedId, before, snapshotFeature(after))
     );
+    this.refreshHandles();
     return true;
   }
 
@@ -486,15 +487,14 @@ export class PolygonEditTool {
     this.clearHandles();
     if (!this.selectedId) return;
 
-    const e = this.ds.entities.getById(this.selectedId);
-    const snap = e ? snapshotPolygonEntity(e) : null;
-    if (!snap) return;
+    const feat = this.store.getPolygon(this.selectedId);
+    if (!feat) return;
 
-    for (let i = 0; i < snap.positions.length; i++) {
-      const p = snap.positions[i];
+    for (let i = 0; i < feat.geometry.positions.length; i++) {
+      const p = feat.geometry.positions[i];
       const isActive = this.activeHandleIndex === i;
 
-      const h = this.ds.entities.add({
+      const h = this.overlayDs.entities.add({
         position: p,
         point: {
           pixelSize: isActive ? 12 : 10,
@@ -517,7 +517,7 @@ export class PolygonEditTool {
   }
 
   private clearHandles() {
-    for (const h of this.handles) this.ds.entities.remove(h);
+    for (const h of this.handles) this.overlayDs.entities.remove(h);
     this.handles = [];
   }
 
@@ -527,7 +527,6 @@ export class PolygonEditTool {
   }
 
   private updateAllHandlePositions(positions: Cesium.Cartesian3[]) {
-    // 仅更新已有 handle 的 position，避免重建
     if (this.handles.length !== positions.length) {
       this.refreshHandles();
       return;
@@ -545,16 +544,15 @@ export class PolygonEditTool {
     if (!Number.isFinite(index)) return;
 
     if (this.selectedId !== ownerId) this.select(ownerId);
+    if (!this.selectedId) return;
 
-    const poly = this.selectedId
-      ? this.ds.entities.getById(this.selectedId)
-      : null;
-    const snap = poly ? snapshotPolygonEntity(poly) : null;
-    if (!snap) return;
+    const feat = this.store.getPolygon(this.selectedId);
+    if (!feat) return;
 
     this.dragMode = "vertex";
     this.dragIndex = index;
-    this.dragBefore = clonePositions(snap.positions);
+    this.dragBeforePositions = clonePositions(feat.geometry.positions);
+    this.dragBeforeFeature = snapshotFeature(feat);
     this.dragStartAnchor = null;
 
     this.setActiveHandle(index);
@@ -564,36 +562,29 @@ export class PolygonEditTool {
   // ---------- geometry apply ----------
   private applyVertexMove(index: number, position: Cesium.Cartesian3) {
     if (!this.selectedId) return;
-
-    const e = this.ds.entities.getById(this.selectedId);
-    if (!e?.polygon?.hierarchy) return;
-
-    const hierarchy = e.polygon.hierarchy.getValue(Cesium.JulianDate.now()) as
-      | Cesium.PolygonHierarchy
-      | undefined;
-    if (!hierarchy?.positions?.length) return;
-
-    const positions = clonePositions(hierarchy.positions);
+    const feat = this.store.getPolygon(this.selectedId);
+    if (!feat) return;
+    const positions = clonePositions(feat.geometry.positions);
     if (index < 0 || index >= positions.length) return;
-
     positions[index] = Cesium.Cartesian3.clone(position);
     this.applyPositions(positions);
-
     const handle = this.handles[index];
     if (handle) handle.position = Cesium.Cartesian3.clone(position) as any;
   }
 
   private applyPositions(positions: Cesium.Cartesian3[]) {
     if (!this.selectedId) return;
-    const e = this.ds.entities.getById(this.selectedId);
-    if (!e?.polygon) return;
-
-    e.polygon.hierarchy = new Cesium.ConstantProperty(
-      new Cesium.PolygonHierarchy(clonePositions(positions))
-    ) as any;
+    const feat = this.store.getPolygon(this.selectedId);
+    if (!feat) return;
+    const next = {
+      ...feat,
+      geometry: { ...feat.geometry, positions: clonePositions(positions) },
+      meta: feat.meta ? { ...feat.meta, updatedAt: Date.now() } : feat.meta,
+    } as any;
+    this.store.upsert(next);
   }
 
-  // ---------- snapping (stage 4) ----------
+  // ---------- snapping ----------
   private applySnapConfig() {
     this.snapping.configure({
       thresholdPx: this.snapThresholdPx,
@@ -606,10 +597,10 @@ export class PolygonEditTool {
   private snapWithEngine(
     candidate: Cesium.Cartesian3,
     cursorScreenPos: Cesium.Cartesian2,
-    query?: { excludeOwnerId?: string }
+    query?: { excludeOwnerId?: string; excludeIndex?: number }
   ): Cesium.Cartesian3 {
     this.applySnapConfig();
-    const res = this.snapping.snap(candidate, cursorScreenPos, query);
+    const res = this.snapping.snap(candidate, cursorScreenPos, query as any);
     if (res) {
       this.snapIndicator.show(res.candidate, candidate);
       return Cesium.Cartesian3.clone(res.candidate.position);
@@ -683,7 +674,6 @@ export class PolygonEditTool {
   }
 }
 
-// 下面这两个函数沿用你原来的即可
 function distancePointToSegment2D(
   p: Cesium.Cartesian2,
   a: Cesium.Cartesian2,

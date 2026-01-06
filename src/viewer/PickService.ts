@@ -23,4 +23,16 @@ export class PickService {
     const id = (picked as any).id;
     return id instanceof Cesium.Entity ? id : null;
   }
+
+  /**
+   * Pick a committed feature id rendered by CesiumFeatureLayer.
+   * Returns null if the picked entity is not a feature.
+   */
+  pickFeatureId(screenPos: Cesium.Cartesian2): string | null {
+    const e = this.pickEntity(screenPos);
+    if (!e) return null;
+    const props = e.properties?.getValue(Cesium.JulianDate.now());
+    const fid = props?.__featureId;
+    return typeof fid === "string" ? fid : null;
+  }
 }

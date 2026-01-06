@@ -1,7 +1,9 @@
 import * as Cesium from "cesium";
 import { PickService } from "./PickService";
 import type { CommandStack } from "./commands/CommandStack";
-import { AddPolygonCommand, ClearAllPolygonsCommand } from "./commands/EntityCommands";
+import { createPolygonFeature } from "../features/types";
+import { AddFeatureCommand, ClearAllFeaturesCommand } from "../features/commands";
+import type { FeatureStore } from "../features/store";
 
 export type PolygonDrawState = "idle" | "drawing" | "committed";
 
@@ -23,7 +25,6 @@ export class PolygonDrawTool {
   private previewEntity: Cesium.Entity | null = null;
   private pointEntities: Cesium.Entity[] = [];
 
-  private committed: Cesium.Entity[] = [];
   readonly ds: Cesium.CustomDataSource;
 
   private onStateListeners: Listener[] = [];
@@ -34,6 +35,7 @@ export class PolygonDrawTool {
     private readonly viewer: Cesium.Viewer,
     private readonly pick: PickService,
     private readonly stack: CommandStack,
+    private readonly store: FeatureStore,
     private readonly opts: PolygonDrawToolOptions = {},
   ) {
     this.ds = new Cesium.CustomDataSource("draw-layer");
@@ -41,7 +43,7 @@ export class PolygonDrawTool {
   }
 
   get pointCount() { return this.positions.length; }
-  get committedCount() { return this.committed.length; }
+  get committedCount() { return this.store.size; }
 
   onStateChange(fn: Listener) { this.onStateListeners.push(fn); }
   onPointChange(fn: Listener) { this.onPointListeners.push(fn); }
@@ -81,15 +83,9 @@ export class PolygonDrawTool {
     if (this.positions.length < 3) { alert("Polygon 至少需要 3 个点。"); return; }
 
     const snapPositions = this.positions.map((p) => Cesium.Cartesian3.clone(p));
-    const material = this.opts.polygonMaterial ?? new Cesium.ColorMaterialProperty(Cesium.Color.CYAN.withAlpha(0.25));
-    const outlineColor = this.opts.outlineColor ?? Cesium.Color.CYAN.withAlpha(0.95);
-
-    this.stack.push(new AddPolygonCommand(
-      this.ds,
-      { positions: snapPositions, material, outlineColor, name: "polygon" },
-      (e) => { this.committed.push(e); this.emitCommitted(); },
-      (id) => { this.committed = this.committed.filter((x) => String(x.id) !== id); this.emitCommitted(); },
-    ));
+    const feature = createPolygonFeature({ positions: snapPositions, name: "polygon" });
+    this.stack.push(new AddFeatureCommand(this.store, feature));
+    this.emitCommitted();
 
     this.cleanupPreview();
     this.positions = [];
@@ -128,18 +124,13 @@ export class PolygonDrawTool {
   }
 
   clearAllCommitted() {
-    if (this.committed.length === 0) return;
-    const current = [...this.committed];
-
-    this.stack.push(new ClearAllPolygonsCommand(
-      this.ds,
-      current,
-      () => { this.committed = []; this.emitCommitted(); },
-      (restored) => { this.committed = restored; this.emitCommitted(); },
-    ));
+    if (this.store.size === 0) return;
+    this.stack.push(new ClearAllFeaturesCommand(this.store));
+    this.emitCommitted();
   }
 
-  getCommittedEntities(): Cesium.Entity[] { return [...this.committed]; }
+  // Kept for backwards compatibility; committed polygons now live in the feature layer.
+  getCommittedEntities(): Cesium.Entity[] { return []; }
 
   private addPoint(p: Cesium.Cartesian3) {
     this.positions.push(p);
