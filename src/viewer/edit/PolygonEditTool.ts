@@ -14,6 +14,10 @@ import { SnapIndicator } from "../snap/SnapIndicator";
 import type { SnapSourcesEnabled, SnapTypesEnabled } from "../snap/SnapTypes";
 import { defaultSnapSources, defaultSnapTypes } from "../snap/SnapTypes";
 
+
+export type PolygonEditToolOptions = {
+  onNotice?: (msg: string) => void;
+};
 type Listener = () => void;
 type DragMode = "none" | "vertex" | "translate";
 
@@ -57,7 +61,8 @@ export class PolygonEditTool {
     private readonly store: FeatureStore,
     private readonly pick: PickService,
     private readonly stack: CommandStack,
-    private readonly isDrawing: () => boolean
+    private readonly isDrawing: () => boolean,
+    private readonly opts: PolygonEditToolOptions = {}
   ) {
     this.handler = new Cesium.ScreenSpaceEventHandler(this.viewer.canvas);
     this.overlayDs = new Cesium.CustomDataSource("edit-overlay");
@@ -252,6 +257,15 @@ export class PolygonEditTool {
       this.unlockCamera();
 
       if (!before || !after) return;
+      const v = validatePolygonPositions(after.geometry.positions);
+      if (!v.ok) {
+        const msg = v.issues[0]?.message ?? "几何校验失败";
+        this.opts.onNotice?.(`编辑提交失败：${msg}`);
+        // revert visual drag by restoring before snapshot
+        this.store.upsert(before);
+        this.refreshHandles();
+        return;
+      }
       this.stack.push(new UpdateFeatureCommand(this.store, id, before, snapshotFeature(after)));
       this.refreshHandles();
     }, Cesium.ScreenSpaceEventType.LEFT_UP);
@@ -440,6 +454,15 @@ export class PolygonEditTool {
     // apply live then commit cmd
     this.store.upsert(after);
     this.activeHandleIndex = null;
+    const v = validatePolygonPositions(after.geometry.positions);
+    if (!v.ok) {
+      const msg = v.issues[0]?.message ?? "几何校验失败";
+      this.opts.onNotice?.(`编辑提交失败：${msg}`);
+      this.store.upsert(before);
+      this.refreshHandles();
+      this.emit();
+      return;
+    }
     this.stack.push(
       new UpdateFeatureCommand(this.store, this.selectedId, before, snapshotFeature(after))
     );
@@ -475,6 +498,14 @@ export class PolygonEditTool {
 
     this.store.upsert(after);
     this.setActiveHandle(insertIndex);
+    const v = validatePolygonPositions(after.geometry.positions);
+    if (!v.ok) {
+      const msg = v.issues[0]?.message ?? "几何校验失败";
+      this.opts.onNotice?.(`插点失败：${msg}`);
+      this.store.upsert(before);
+      this.refreshHandles();
+      return false;
+    }
     this.stack.push(
       new UpdateFeatureCommand(this.store, this.selectedId, before, snapshotFeature(after))
     );

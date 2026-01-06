@@ -30,3 +30,5 @@ html, body, #app { height:100%; width:100%; margin:0; overflow:hidden; font-fami
 .badge { display:inline-flex; align-items:center; gap:6px; padding:3px 8px; border-radius:999px; border:1px solid rgba(255,255,255,.16); background: rgba(0,0,0,.20); font-size:12px; }
 .dot { width:8px; height:8px; border-radius:999px; background:#6ee7b7; }
 .dot.off { background:#fca5a5; }
+
+.notice{margin:8px 0;padding:8px 10px;border:1px solid rgba(255,255,255,.15);border-radius:8px;font-size:12px;line-height:1.4;display:none;}

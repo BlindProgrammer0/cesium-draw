@@ -24,6 +24,7 @@ export function createApp(mountEl: HTMLElement) {
   panel.className = "panel";
   panel.innerHTML = `
     <h1>阶段 4：GIS 吸附编辑（顶点/中点/边/网格 + 吸附源 + 优先级 + 可视化提示，全部可 Undo/Redo）</h1>
+    <div id="notice" class="notice"></div>
 
     <div class="row">
       <span class="badge"><span class="dot off" id="stateDot"></span><span id="stateText">idle</span></span>
@@ -94,6 +95,17 @@ export function createApp(mountEl: HTMLElement) {
     <div class="hint">提示：撤销加点只作用于绘制中；Undo/Redo 作用于已提交动作（提交/清空/编辑/插点/删点/删除）。</div>
   `;
 
+  const noticeEl = panel.querySelector<HTMLDivElement>("#notice")!;
+  let noticeTimer: any = null;
+  const setNotice = (msg: string) => {
+    if (!noticeEl) return;
+    noticeEl.textContent = msg;
+    noticeEl.style.display = msg ? "block" : "none";
+    if (noticeTimer) clearTimeout(noticeTimer);
+    if (msg) noticeTimer = setTimeout(() => setNotice(""), 4000);
+  };
+
+
   root.appendChild(container);
   root.appendChild(panel);
   mountEl.appendChild(root);
@@ -143,6 +155,7 @@ export function createApp(mountEl: HTMLElement) {
   });
 
   const draw = new PolygonDrawTool(viewer, pick, stack, store, {
+    onNotice: setNotice,
     polygonMaterial: new Cesium.ColorMaterialProperty(
       Cesium.Color.CYAN.withAlpha(0.25)
     ),
@@ -150,7 +163,7 @@ export function createApp(mountEl: HTMLElement) {
     pointColor: Cesium.Color.YELLOW.withAlpha(0.95),
   });
 
-  const edit = new PolygonEditTool(viewer, featureLayer, store, pick, stack, () => draw.state === "drawing");
+  const edit = new PolygonEditTool(viewer, featureLayer, store, pick, stack, () => draw.state === "drawing", { onNotice: setNotice });
 
   // Stage 5.1: Use a single session as the orchestration boundary.
   const session = new EditorSession(draw, edit, pick, stack);

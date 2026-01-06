@@ -4,10 +4,13 @@ import type { CommandStack } from "./commands/CommandStack";
 import { createPolygonFeature } from "../features/types";
 import { AddFeatureCommand, ClearAllFeaturesCommand } from "../features/commands";
 import type { FeatureStore } from "../features/store";
+import { validatePolygonPositions } from "../features/validation";
 
 export type PolygonDrawState = "idle" | "drawing" | "committed";
 
 export type PolygonDrawToolOptions = {
+  onNotice?: (msg: string) => void;
+
   polygonMaterial?: Cesium.MaterialProperty;
   outlineColor?: Cesium.Color;
   pointColor?: Cesium.Color;
@@ -84,6 +87,12 @@ export class PolygonDrawTool {
 
     const snapPositions = this.positions.map((p) => Cesium.Cartesian3.clone(p));
     const feature = createPolygonFeature({ positions: snapPositions, name: "polygon" });
+    const v = validatePolygonPositions(snapPositions);
+    if (!v.ok) {
+      const msg = v.issues[0]?.message ?? "几何校验失败";
+      this.opts.onNotice?.(`提交失败：${msg}`);
+      return;
+    }
     this.stack.push(new AddFeatureCommand(this.store, feature));
     this.emitCommitted();
 
