@@ -23,6 +23,8 @@ html, body, #app { height:100%; width:100%; margin:0; overflow:hidden; font-fami
 .field input[type="range"] { width: 160px; }
 .field code { opacity:.95; }
 
+.select { appearance:none; border:1px solid rgba(255,255,255,.16); background: rgba(0,0,0,.22); color:#fff; padding:6px 8px; border-radius:8px; font-size:12px; }
+
 .textarea { width:100%; min-height:120px; resize:vertical; border-radius:8px; border:1px solid rgba(255,255,255,.16);
   background: rgba(0,0,0,.22); color:#fff; padding:8px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px;
 }

@@ -13,6 +13,7 @@ import { SnappingEngine } from "../snap/SnappingEngine";
 import { SnapIndicator } from "../snap/SnapIndicator";
 import type { SnapSourcesEnabled, SnapTypesEnabled } from "../snap/SnapTypes";
 import { defaultSnapSources, defaultSnapTypes } from "../snap/SnapTypes";
+import { FeatureSpatialIndex } from "../../features/spatial/FeatureSpatialIndex";
 
 
 export type PolygonEditToolOptions = {
@@ -62,6 +63,7 @@ export class PolygonEditTool {
 
   private readonly snapping: SnappingEngine;
   private readonly snapIndicator: SnapIndicator;
+  private readonly spatialIndex: FeatureSpatialIndex;
 
   constructor(
     private readonly viewer: Cesium.Viewer,
@@ -76,7 +78,9 @@ export class PolygonEditTool {
     this.overlayDs = new Cesium.CustomDataSource("edit-overlay");
     this.viewer.dataSources.add(this.overlayDs);
 
-    this.snapping = new SnappingEngine(this.viewer, this.layer.ds);
+    // Stage 5.5: spatial index accelerates snapping candidates.
+    this.spatialIndex = new FeatureSpatialIndex(this.store, { cellSizeMeters: 50 });
+    this.snapping = new SnappingEngine(this.viewer, this.layer.ds, this.spatialIndex);
     this.snapIndicator = new SnapIndicator(this.viewer);
     this.applySnapConfig();
 
@@ -460,30 +464,22 @@ export class PolygonEditTool {
     }
 
     const before = snapshotFeature(feat);
-    const nextPositions = clonePositions(feat.geometry.positions).filter(
-      (_, i) => i !== this.activeHandleIndex
-    );
+    const nextPositions = clonePositions(feat.geometry.positions).filter((_, i) => i !== this.activeHandleIndex);
+    const v = validatePolygonPositions(nextPositions);
+    if (!v.ok) {
+      const msg = v.issues[0]?.message ?? "几何校验失败";
+      this.opts.onNotice?.(`删点失败：${msg}`);
+      return;
+    }
+
     const after = {
       ...feat,
       geometry: { ...feat.geometry, positions: nextPositions },
       meta: feat.meta ? { ...feat.meta, updatedAt: Date.now() } : feat.meta,
     } as any;
 
-    // apply live then commit cmd
-    this.store.upsert(after);
     this.activeHandleIndex = null;
-    const v = validatePolygonPositions(after.geometry.positions);
-    if (!v.ok) {
-      const msg = v.issues[0]?.message ?? "几何校验失败";
-      this.opts.onNotice?.(`编辑提交失败：${msg}`);
-      this.store.upsert(before);
-      this.refreshHandles();
-      this.emit();
-      return;
-    }
-    this.stack.push(
-      new UpdateFeatureCommand(this.store, this.selectedId, before, snapshotFeature(after))
-    );
+    this.stack.push(new UpdateFeatureCommand(this.store, this.selectedId, before, snapshotFeature(after)));
     this.refreshHandles();
     this.emit();
   }
@@ -508,25 +504,22 @@ export class PolygonEditTool {
     const before = snapshotFeature(feat);
     const next = clonePositions(feat.geometry.positions);
     next.splice(insertIndex, 0, projected);
+
+    const v = validatePolygonPositions(next);
+    if (!v.ok) {
+      const msg = v.issues[0]?.message ?? "几何校验失败";
+      this.opts.onNotice?.(`插点失败：${msg}`);
+      return false;
+    }
+
     const after = {
       ...feat,
       geometry: { ...feat.geometry, positions: next },
       meta: feat.meta ? { ...feat.meta, updatedAt: Date.now() } : feat.meta,
     } as any;
 
-    this.store.upsert(after);
+    this.stack.push(new UpdateFeatureCommand(this.store, this.selectedId, before, snapshotFeature(after)));
     this.setActiveHandle(insertIndex);
-    const v = validatePolygonPositions(after.geometry.positions);
-    if (!v.ok) {
-      const msg = v.issues[0]?.message ?? "几何校验失败";
-      this.opts.onNotice?.(`插点失败：${msg}`);
-      this.store.upsert(before);
-      this.refreshHandles();
-      return false;
-    }
-    this.stack.push(
-      new UpdateFeatureCommand(this.store, this.selectedId, before, snapshotFeature(after))
-    );
     this.refreshHandles();
     return true;
   }

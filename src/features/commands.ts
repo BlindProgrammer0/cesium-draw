@@ -73,6 +73,32 @@ export class ClearAllFeaturesCommand implements Command {
 }
 
 /**
+ * Replace the entire store with a given set of features as a single undoable command.
+ * - do(): clears store then upserts all items
+ * - undo(): restores the exact previous snapshot (including features not present in the new set)
+ */
+export class ReplaceAllFeaturesCommand implements Command {
+  readonly name = "ReplaceAllFeatures";
+  private before: FeatureSnapshot[] = [];
+  private readonly after: FeatureSnapshot[];
+
+  constructor(private readonly store: FeatureStore, features: Feature[]) {
+    this.after = features.map(snapshotFeature);
+  }
+
+  do(): void {
+    this.before = this.store.all().map(snapshotFeature);
+    this.store.clear();
+    for (const f of this.after) this.store.upsert(f);
+  }
+
+  undo(): void {
+    this.store.clear();
+    for (const f of this.before) this.store.upsert(f);
+  }
+}
+
+/**
  * Upsert a batch of features as a single undoable command.
  * - If a feature id already exists, it is replaced (and old value is restored on undo).
  * - If it doesn't exist, it is removed on undo.

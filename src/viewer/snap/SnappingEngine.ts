@@ -2,6 +2,7 @@ import * as Cesium from "cesium";
 import type { SnapCandidate, SnapPriority, SnapQueryOptions, SnapResult, SnapSourcesEnabled, SnapTypesEnabled } from "./SnapTypes";
 import { defaultSnapPriority, defaultSnapSources, defaultSnapTypes } from "./SnapTypes";
 import { cartographicSnapToGrid, closestPointOnSegment3D, distancePointToSegment2D } from "./math";
+import type { FeatureSpatialIndex } from "../../features/spatial/FeatureSpatialIndex";
 
 export type SnappingEngineOptions = {
   thresholdPx?: number;
@@ -26,7 +27,8 @@ export class SnappingEngine {
 
   constructor(
     private readonly viewer: Cesium.Viewer,
-    private readonly ds: Cesium.CustomDataSource
+    private readonly ds: Cesium.CustomDataSource,
+    private readonly index?: FeatureSpatialIndex
   ) {}
 
   configure(opts: SnappingEngineOptions) {
@@ -75,22 +77,94 @@ export class SnappingEngine {
     const candidates: SnapCandidate[] = [];
 
     if (this.sources.polygons) {
-      for (const e of this.ds.entities.values) {
-        if (!e.polygon) continue;
-        const id = String(e.id);
-        if (query?.excludeOwnerId && id === query.excludeOwnerId) {
-          // For translate we still exclude all of the edited polygon to avoid self-lock.
-          // For vertex drag we also exclude the moving vertex via excludeIndex below.
+      // Prefer spatial index (Stage 5.5) for large datasets.
+      if (this.index) {
+        const radiusMeters = this.thresholdPx * metersPerPixelAt(scene, worldCandidate);
+        const { vertices, edges } = this.index.query(worldCandidate, radiusMeters);
+
+        if (this.types.vertex || this.types.midpoint) {
+          for (const v of vertices) {
+            const id = String(v.featureId);
+            if (query?.excludeOwnerId && id === query.excludeOwnerId) {
+              if (query.excludeIndex === undefined) continue; // exclude whole feature
+              if (query.excludeIndex === v.vertexIndex) continue;
+            }
+
+            if (this.types.vertex) {
+              const sp = scene.cartesianToCanvasCoordinates(v.position);
+              if (sp) {
+                const d = Math.hypot(sp.x - cursorScreenPos.x, sp.y - cursorScreenPos.y);
+                if (d <= this.thresholdPx) {
+                  candidates.push({
+                    type: "vertex",
+                    position: Cesium.Cartesian3.clone(v.position),
+                    distancePx: d,
+                    priority: this.priority.vertex,
+                    meta: { ownerId: id, vertexIndex: v.vertexIndex },
+                  });
+                }
+              }
+            }
+          }
         }
 
-        const hierarchy = e.polygon.hierarchy?.getValue(Cesium.JulianDate.now()) as Cesium.PolygonHierarchy | undefined;
-        const positions = hierarchy?.positions;
-        if (!positions?.length) continue;
+        if (this.types.midpoint || this.types.edge) {
+          for (const e of edges) {
+            const id = String(e.featureId);
+            if (query?.excludeOwnerId && id === query.excludeOwnerId && query.excludeIndex === undefined) continue;
 
-        const n = positions.length;
-        for (let i = 0; i < n; i++) {
-          const a = positions[i];
-          const b = positions[(i + 1) % n];
+            const a = e.a;
+            const b = e.b;
+
+            if (this.types.midpoint) {
+              const mid = Cesium.Cartesian3.midpoint(a, b, new Cesium.Cartesian3());
+              const sp = scene.cartesianToCanvasCoordinates(mid);
+              if (sp) {
+                const d = Math.hypot(sp.x - cursorScreenPos.x, sp.y - cursorScreenPos.y);
+                if (d <= this.thresholdPx) {
+                  candidates.push({
+                    type: "midpoint",
+                    position: mid,
+                    distancePx: d,
+                    priority: this.priority.midpoint,
+                    meta: { ownerId: id, edgeStartIndex: e.edgeStartIndex },
+                  });
+                }
+              }
+            }
+
+            if (this.types.edge) {
+              const a2 = scene.cartesianToCanvasCoordinates(a);
+              const b2 = scene.cartesianToCanvasCoordinates(b);
+              if (a2 && b2) {
+                const seg = distancePointToSegment2D(cursorScreenPos, a2, b2);
+                if (seg.dist <= this.thresholdPx) {
+                  const proj = closestPointOnSegment3D(worldCandidate, a, b);
+                  candidates.push({
+                    type: "edge",
+                    position: proj.point,
+                    distancePx: seg.dist,
+                    priority: this.priority.edge,
+                    meta: { ownerId: id, edgeStartIndex: e.edgeStartIndex },
+                  });
+                }
+              }
+            }
+          }
+        }
+      } else {
+        // Fallback: scan rendered entities (fine for small datasets).
+        for (const e of this.ds.entities.values) {
+          if (!e.polygon) continue;
+          const id = String(e.id);
+          const hierarchy = e.polygon.hierarchy?.getValue(Cesium.JulianDate.now()) as Cesium.PolygonHierarchy | undefined;
+          const positions = hierarchy?.positions;
+          if (!positions?.length) continue;
+
+          const n = positions.length;
+          for (let i = 0; i < n; i++) {
+            const a = positions[i];
+            const b = positions[(i + 1) % n];
 
           // Vertex
           if (this.types.vertex) {
@@ -158,6 +232,7 @@ export class SnappingEngine {
               }
             }
           }
+          }
         }
       }
     }
@@ -192,5 +267,16 @@ export class SnappingEngine {
     if (near.length > 1) near.sort((a, b) => b.priority - a.priority);
     const best = near[0] ?? candidates[0];
     return { candidate: best };
+  }
+}
+
+function metersPerPixelAt(scene: Cesium.Scene, world: Cesium.Cartesian3): number {
+  try {
+    const canvas = scene.canvas;
+    const bs = new Cesium.BoundingSphere(world, 1.0);
+    const px = scene.camera.getPixelSize(bs, canvas.clientWidth, canvas.clientHeight);
+    return Number.isFinite(px) && px > 0 ? px : 1;
+  } catch {
+    return 1;
   }
 }

@@ -10,7 +10,7 @@ import { PolygonEditTool } from "./viewer/edit/PolygonEditTool";
 import { EditorSession } from "./editor/EditorSession";
 import { FeatureStore } from "./features/store";
 import { CesiumFeatureLayer } from "./features/CesiumFeatureLayer";
-import { UpsertManyFeaturesCommand } from "./features/commands";
+import { ReplaceAllFeaturesCommand, UpsertManyFeaturesCommand } from "./features/commands";
 import { validatePolygonPositions } from "./features/validation";
 
 export function createApp(mountEl: HTMLElement) {
@@ -55,7 +55,15 @@ export function createApp(mountEl: HTMLElement) {
       <button class="btn" id="btnDeselect">取消选中</button>
       <button class="btn" id="btnExport">导出 GeoJSON</button>
       <button class="btn" id="btnCopy">复制 GeoJSON</button>
-      <button class="btn" id="btnImport">导入 GeoJSON（可 Undo）</button>
+      <label class="field">
+        导入策略
+        <select id="importStrategy" class="select">
+          <option value="merge" selected>合并（同 id 覆盖）</option>
+          <option value="append">追加（自动新 ID）</option>
+          <option value="overwrite">覆盖（清空后导入）</option>
+        </select>
+      </label>
+      <button class="btn" id="btnImport">导入 GeoJSON（预检 + 可 Undo）</button>
     </div>
 
     <div class="row">
@@ -197,24 +205,84 @@ export function createApp(mountEl: HTMLElement) {
   geojsonFile.style.display = "none";
   panel.appendChild(geojsonFile);
 
-  const importGeoJSON = (input: any) => {
-    const features = polygonFeaturesFromGeoJSON(input);
-    if (features.length === 0) {
+  const importGeoJSON = (input: any, strategy: "merge" | "append" | "overwrite") => {
+    const parsed = polygonFeaturesFromGeoJSON(input);
+    if (parsed.length === 0) {
       setNotice("导入失败：未找到可导入的 Polygon/MultiPolygon。 ");
+      geojsonOut.value = JSON.stringify({ strategy, ok: false, reason: "no-polygons" }, null, 2);
       return;
     }
 
-    for (const f of features) {
+    // --- preflight ---
+    const invalid: { id: string; message: string }[] = [];
+    const incomingIds = new Map<string, number>();
+    for (const f of parsed) {
+      incomingIds.set(f.id, (incomingIds.get(f.id) ?? 0) + 1);
       const v = validatePolygonPositions(f.geometry.positions);
-      if (!v.ok) {
-        const msg = v.issues[0]?.message ?? "几何校验失败";
-        setNotice(`导入失败（${f.id}）：${msg}`);
-        return;
-      }
+      if (!v.ok) invalid.push({ id: f.id, message: v.issues[0]?.message ?? "几何校验失败" });
     }
 
-    stack.push(new UpsertManyFeaturesCommand(store, features));
-    setNotice(`已导入 ${features.length} 个多边形（可 Undo）。`);
+    const duplicatedIncoming = [...incomingIds.entries()].filter(([, c]) => c > 1).map(([id, c]) => ({ id, count: c }));
+    const conflicts = parsed.filter((f) => store.has(f.id)).map((f) => f.id);
+
+    const report = {
+      strategy,
+      total: parsed.length,
+      invalidCount: invalid.length,
+      duplicatedIncomingCount: duplicatedIncoming.length,
+      conflictCount: conflicts.length,
+      willClear: strategy === "overwrite" ? store.size : 0,
+      willAdd: strategy === "overwrite" ? parsed.length : strategy === "merge" ? parsed.length - conflicts.length : parsed.length,
+      willReplace: strategy === "merge" ? conflicts.length : 0,
+      notes: [
+        "导入仅支持 Polygon/MultiPolygon，且仅使用第一条外环（不处理洞）。",
+        "预检失败时不会写入数据。",
+        "追加策略会在 id 冲突/重复时自动生成新 id，并在 properties.__sourceId 中保留原 id。",
+      ],
+      invalid: invalid.slice(0, 20),
+      duplicatedIncoming: duplicatedIncoming.slice(0, 20),
+      conflicts: conflicts.slice(0, 20),
+    };
+
+    geojsonOut.value = JSON.stringify({ preflight: report }, null, 2);
+
+    if (invalid.length) {
+      setNotice(`预检失败：发现 ${invalid.length} 个无效几何（详见文本框）。`);
+      return;
+    }
+
+    // --- normalize by strategy ---
+    let features = parsed;
+    if (strategy === "append") {
+      const used = new Set<string>(store.all().map((f) => f.id));
+      const remapped: any[] = [];
+      for (const f of parsed) {
+        let id = f.id;
+        if (used.has(id) || (incomingIds.get(id) ?? 0) > 1) {
+          const sourceId = id;
+          id = Cesium.createGuid();
+          remapped.push({
+            ...f,
+            id,
+            properties: { ...(f.properties ?? {}), __sourceId: sourceId },
+            meta: f.meta ? { ...f.meta, updatedAt: Date.now() } : f.meta,
+          });
+        } else {
+          remapped.push(f);
+        }
+        used.add(id);
+      }
+      features = remapped as any;
+    }
+
+    if (strategy === "overwrite") {
+      stack.push(new ReplaceAllFeaturesCommand(store, features));
+      setNotice(`覆盖导入：清空 ${report.willClear} 个并导入 ${features.length} 个（可 Undo）。`);
+    } else {
+      stack.push(new UpsertManyFeaturesCommand(store, features));
+      setNotice(`导入完成：${features.length} 个（${strategy === "append" ? "追加" : "合并"}，可 Undo）。`);
+    }
+
     geojsonOut.value = JSON.stringify(
       geojsonFeatureCollectionFromFeatures(store.all()),
       null,
@@ -403,10 +471,11 @@ export function createApp(mountEl: HTMLElement) {
 
   // Stage 5.4: Import GeoJSON.
   btnImport.addEventListener("click", () => {
+    const strategy = (($("importStrategy") as HTMLSelectElement)?.value as any) ?? "merge";
     const text = geojsonOut.value.trim();
     if (text) {
       try {
-        importGeoJSON(JSON.parse(text));
+        importGeoJSON(JSON.parse(text), strategy);
         return;
       } catch {
         // fall through to file chooser
@@ -421,7 +490,8 @@ export function createApp(mountEl: HTMLElement) {
     if (!file) return;
     try {
       const text = await file.text();
-      importGeoJSON(JSON.parse(text));
+      const strategy = (($("importStrategy") as HTMLSelectElement)?.value as any) ?? "merge";
+      importGeoJSON(JSON.parse(text), strategy);
     } catch {
       setNotice("导入失败：文件不是有效 JSON/GeoJSON。 ");
     }
