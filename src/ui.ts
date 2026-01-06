@@ -4,6 +4,7 @@ import { PolygonDrawTool } from "./viewer/PolygonDrawTool";
 import { geojsonFeatureCollectionFromEntities } from "./viewer/geojson";
 import { CommandStack } from "./viewer/commands/CommandStack";
 import { PolygonEditTool } from "./viewer/edit/PolygonEditTool";
+import { EditorSession } from "./editor/EditorSession";
 
 export function createApp(mountEl: HTMLElement) {
   // Cesium 会在运行时动态请求 Workers/Assets/Widgets 等静态资源。
@@ -146,6 +147,9 @@ export function createApp(mountEl: HTMLElement) {
     () => draw.state === "drawing"
   );
 
+  // Stage 5.1: Use a single session as the orchestration boundary.
+  const session = new EditorSession(draw, edit, pick, stack);
+
   const $ = <T extends HTMLElement>(id: string) =>
     document.getElementById(id) as T;
   const stateDot = $("stateDot");
@@ -178,10 +182,11 @@ export function createApp(mountEl: HTMLElement) {
   const gridSizeVal = $("gridSizeVal");
 
   function refreshStatus() {
-    stateText.textContent = draw.state;
+    const st = session.state;
+    stateText.textContent = st.mode;
     ptCount.textContent = String(draw.pointCount);
     committedCount.textContent = String(draw.committedCount);
-    stateDot.classList.toggle("off", draw.state === "idle");
+    stateDot.classList.toggle("off", st.mode === "idle");
 
     selectedId.textContent = edit.selectedEntityId ?? "-";
     activeVertex.textContent =
@@ -259,45 +264,38 @@ export function createApp(mountEl: HTMLElement) {
   edit.setSnapThresholdPx(Number(snapThreshold.value));
   edit.setGridSizeMeters(Number(gridSize.value));
 
-  draw.onStateChange(refreshStatus);
-  draw.onPointChange(refreshStatus);
-  draw.onCommittedChange(() => {
-    const id = edit.selectedEntityId;
-    if (id && !draw.ds.entities.getById(id)) edit.deselect();
-    refreshStatus();
-  });
-  edit.onChange(refreshStatus);
-  stack.onChange(() => {
+  // Session-driven refresh (stage 5). We keep the existing per-tool hooks,
+  // but centralize UI invalidation through the session boundary.
+  session.onChange(() => {
     if (edit.selectedEntityId) edit.refreshHandles();
     refreshStatus();
   });
   refreshStatus();
 
-  $("btnStart").addEventListener("click", () => draw.start());
-  $("btnFinish").addEventListener("click", () => draw.finish());
-  $("btnUndoPoint").addEventListener("click", () => draw.undoPoint());
-  $("btnCancel").addEventListener("click", () => draw.cancel());
+  $("btnStart").addEventListener("click", () => session.startDrawing());
+  $("btnFinish").addEventListener("click", () => session.finishDrawing());
+  $("btnUndoPoint").addEventListener("click", () => session.undoDrawPoint());
+  $("btnCancel").addEventListener("click", () => session.cancelDrawing());
 
-  btnUndoCmd.addEventListener("click", () => stack.undo());
-  btnRedoCmd.addEventListener("click", () => stack.redo());
+  btnUndoCmd.addEventListener("click", () => session.undo());
+  btnRedoCmd.addEventListener("click", () => session.redo());
 
   $("btnClearCommitted").addEventListener("click", () => {
-    edit.deselect();
-    draw.clearAllCommitted();
+    session.clearCommitted();
     geojsonOut.value = "";
   });
 
   $("btnDeleteSelected").addEventListener("click", () => {
-    edit.deleteSelectedPolygon();
+    session.deleteSelectedPolygon();
     geojsonOut.value = "";
   });
 
   $("btnDeleteVertex").addEventListener("click", () => {
-    edit.deleteActiveVertex();
+    session.deleteActiveVertex();
     geojsonOut.value = "";
   });
 
-  $("btnDeselect").addEventListener("click", () => edit.deselect());
+  $("btnDeselect").addEventListener("click", () => session.deselect());
 
   $("btnExport").addEventListener("click", () => {
     geojsonOut.value = JSON.stringify(
@@ -312,7 +310,7 @@ export function createApp(mountEl: HTMLElement) {
     if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
-      stateText.textContent = draw.state + " (copied)";
+      stateText.textContent = session.state.mode + " (copied)";
       setTimeout(refreshStatus, 800);
     } catch {
       alert("复制失败：浏览器可能未授权剪贴板权限。");
@@ -324,5 +322,5 @@ export function createApp(mountEl: HTMLElement) {
     duration: 0.8,
   });
 
-  return { viewer, draw, edit, pick, stack };
+  return { viewer, session, draw, edit, pick, stack };
 }

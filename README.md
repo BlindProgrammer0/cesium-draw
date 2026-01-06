@@ -1,8 +1,16 @@
-# 阶段 4：GIS 吸附编辑（基于 stage3 工程升级）
+# 阶段 5.1：EditorSession（FSM 驱动的编辑会话）+ 阶段 4 GIS 吸附编辑
 
-本版本在你原有 **stage3（PolygonEditTool + PickService + CommandStack）** 的基础上，升级为更专业的 GIS 编辑吸附体验。
+本版本在你原有 **stage3（PolygonEditTool + PickService + CommandStack）** 的基础上：
+
+1. 完成 **阶段 4：GIS 吸附编辑**（顶点/中点/边/网格 + 吸附源/优先级/提示层）。
+2. 进入 **阶段 5.1：引入 EditorSession（有限状态机 + 会话边界）**，把 UI 与工具的编排收敛到一个可扩展的“编辑会话”层，为后续的校验、持久化、协作、性能优化等能力打底。
 
 ## 已实现能力
+
+### 阶段 5.1：EditorSession（FSM 编排层）
+- 新增 `src/editor/EditorSession.ts`：统一对外暴露绘制/编辑/撤销等命令 API
+- 新增 `src/editor/fsm.ts`：最小可扩展 FSM（idle / drawing / editing），集中管理模式切换与不变量
+- `src/ui.ts` 不再直接依赖“工具状态拼装 UI”，而是以 `session.state` 作为单一权威状态源
 
 ### 吸附（Snapping）
 - 吸附类型：**顶点 / 中点 / 边 / 网格点**
@@ -43,3 +51,5 @@ npm run dev
 - `src/viewer/edit/PolygonEditTool.ts`：编辑工具（阶段 4 吸附接入点）
 - `src/viewer/snap/SnappingEngine.ts`：吸附引擎
 - `src/viewer/snap/SnapIndicator.ts`：吸附提示层
+- `src/editor/EditorSession.ts`：阶段 5.1 会话编排层
+- `src/editor/fsm.ts`：阶段 5.1 有限状态机
