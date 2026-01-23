@@ -1,67 +1,63 @@
-import { reduceEditorState, initialEditorState, type EditorEvent, type EditorState } from "./fsm";
-import type { PickService } from "../viewer/PickService";
+import {
+  reduceEditorState,
+  initialEditorState,
+  type EditorEvent,
+  type EditorState,
+  type DrawKind,
+} from "./fsm";
 import type { CommandStack } from "../viewer/commands/CommandStack";
 import type { PolygonDrawTool } from "../viewer/PolygonDrawTool";
+import type { PolylineDrawTool } from "../viewer/PolylineDrawTool";
+import type { PointDrawTool } from "../viewer/PointDrawTool";
 import type { PolygonEditTool } from "../viewer/edit/PolygonEditTool";
+import type { FeatureStore } from "../features/store";
 
 type Listener = () => void;
 
 /**
- * Stage 5.1: EditorSession (FSM-driven orchestration)
+ * EditorSession (FSM-driven orchestration)
  *
- * Responsibilities:
- * - One authoritative editor state for UI (idle/drawing/editing)
- * - Tool orchestration and invariants (e.g. editing guarded during drawing)
- * - Single integration point for future features (validation, persistence, collaboration)
+ * Stage 5.1+: extended to support multiple draw kinds:
+ * - polygon / polyline / point
+ *
+ * Notes:
+ * - Selection/picking is still handled by the edit tool; session only provides
+ *   a single authoritative UI state and tool lifecycle invariants.
  */
 export class EditorSession {
   private listeners = new Set<Listener>();
   private _state: EditorState = initialEditorState;
 
+  private currentDrawKind: DrawKind | null = null;
+
   constructor(
-    public readonly draw: PolygonDrawTool,
-    public readonly edit: PolygonEditTool,
-    public readonly pick: PickService,
-    public readonly stack: CommandStack
-  ) {
-    // Sync from tools -> session state
-    this.draw.onStateChange(() => {
-      if (this.draw.state === "drawing") this.dispatch({ type: "DRAW_START" });
-      if (this.draw.state === "idle") this.dispatch({ type: "DRAW_FINISH" });
-      // draw tool internally distinguishes finish/cancel; we keep minimal transitions.
-    });
-
-    this.draw.onCommittedChange(() => {
-      this.dispatch({ type: "COMMITTED_CHANGED" });
-    });
-
-    // High-frequency (drawing) updates should still reflect in UI.
-    this.draw.onPointChange(() => {
-      this.emit();
-    });
-
-    this.edit.onChange(() => {
-      const id = this.edit.selectedEntityId;
-      if (id && this._state.selectedId !== id) this.dispatch({ type: "SELECT", id });
-      if (!id && this._state.selectedId) this.dispatch({ type: "DESELECT" });
-    });
-
-    this.stack.onChange(() => {
-      // Handle refresh is still owned by UI (it knows what to refresh visually),
-      // but we emit for state-driven UIs.
-      this.emit();
-    });
-  }
+    private readonly stack: CommandStack,
+    private readonly store: FeatureStore,
+    private readonly drawPolygon: PolygonDrawTool,
+    private readonly drawPolyline: PolylineDrawTool,
+    private readonly drawPoint: PointDrawTool,
+    private readonly edit: PolygonEditTool
+  ) {}
 
   get state(): EditorState {
-    // Mode derived from draw.state takes precedence.
-    if (this.draw.state === "drawing") {
-      return { ...this._state, mode: "drawing" };
+    // Drawing takes precedence
+    if (this.currentDrawKind) {
+      const isDrawing =
+        (this.currentDrawKind === "polygon" && this.drawPolygon.state === "drawing") ||
+        (this.currentDrawKind === "polyline" && this.drawPolyline.getState() === "drawing") ||
+        (this.currentDrawKind === "point" && this.drawPoint.getState() === "drawing");
+
+      if (isDrawing) {
+        return { ...this._state, mode: "drawing", drawingKind: this.currentDrawKind };
+      }
+      // tool already ended
+      this.currentDrawKind = null;
     }
-    // When not drawing, mode depends on selection.
+
     const selectedId = this.edit.selectedEntityId ?? null;
+    const selectedKind = selectedId ? ((this.store.get(selectedId)?.kind as any) ?? null) : null;
     const mode = selectedId ? "editing" : "idle";
-    return { ...this._state, mode, selectedId };
+    return { ...this._state, mode, drawingKind: null, selectedId, selectedKind };
   }
 
   onChange(fn: Listener) {
@@ -69,35 +65,45 @@ export class EditorSession {
     return () => this.listeners.delete(fn);
   }
 
-  /** Stage 5-friendly command API */
-  startDrawing() {
-    this.draw.start();
-    this.dispatch({ type: "DRAW_START" });
+  startDrawing(kind: DrawKind) {
+    // stop editing selection
+    this.deselect();
+
+    // cancel any existing drawing
+    if (this.currentDrawKind) this.cancelDrawing();
+
+    this.currentDrawKind = kind;
+    if (kind === "polygon") this.drawPolygon.start();
+    if (kind === "polyline") this.drawPolyline.start();
+    if (kind === "point") this.drawPoint.start();
+
+    this.dispatch({ type: "DRAW_START", kind });
   }
 
   finishDrawing() {
-    this.draw.finish();
+    if (!this.currentDrawKind) return;
+    if (this.currentDrawKind === "polygon") this.drawPolygon.finish();
+    if (this.currentDrawKind === "polyline") this.drawPolyline.finish();
+    if (this.currentDrawKind === "point") this.drawPoint.finish();
+
+    this.currentDrawKind = null;
     this.dispatch({ type: "DRAW_FINISH" });
   }
 
-  cancelDrawing() {
-    this.draw.cancel();
-    this.dispatch({ type: "DRAW_CANCEL" });
-  }
-
   undoDrawPoint() {
-    this.draw.undoPoint();
-    this.emit();
+    if (!this.currentDrawKind) return;
+    if (this.currentDrawKind === "polygon") this.drawPolygon.undoPoint();
+    if (this.currentDrawKind === "polyline") this.drawPolyline.undoPoint();
   }
 
-  undo() {
-    this.stack.undo();
-    this.emit();
-  }
+  cancelDrawing() {
+    if (!this.currentDrawKind) return;
+    if (this.currentDrawKind === "polygon") this.drawPolygon.cancel();
+    if (this.currentDrawKind === "polyline") this.drawPolyline.cancel();
+    if (this.currentDrawKind === "point") this.drawPoint.cancel();
 
-  redo() {
-    this.stack.redo();
-    this.emit();
+    this.currentDrawKind = null;
+    this.dispatch({ type: "DRAW_CANCEL" });
   }
 
   deselect() {
@@ -105,21 +111,29 @@ export class EditorSession {
     this.dispatch({ type: "DESELECT" });
   }
 
-  deleteSelectedPolygon() {
-    this.edit.deleteSelectedPolygon();
-    // selection will be updated by edit.onChange
-    this.emit();
+  undo() {
+    this.stack.undo();
+    this.dispatch({ type: "COMMITTED_CHANGED" });
+  }
+
+  redo() {
+    this.stack.redo();
+    this.dispatch({ type: "COMMITTED_CHANGED" });
+  }
+
+  clearCommitted() {
+    this.drawPolygon.clearAllCommitted();
+    this.dispatch({ type: "COMMITTED_CHANGED" });
+  }
+
+  deleteSelected() {
+    this.edit.deleteSelected();
+    this.dispatch({ type: "COMMITTED_CHANGED" });
   }
 
   deleteActiveVertex() {
     this.edit.deleteActiveVertex();
-    this.emit();
-  }
-
-  clearCommitted() {
-    this.deselect();
-    this.draw.clearAllCommitted();
-    this.emit();
+    this.dispatch({ type: "COMMITTED_CHANGED" });
   }
 
   private dispatch(ev: EditorEvent) {

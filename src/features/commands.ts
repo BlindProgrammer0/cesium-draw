@@ -145,6 +145,28 @@ export function snapshotFeature(f: Feature): FeatureSnapshot {
       properties: f.properties ? { ...f.properties } : undefined,
     } as FeatureSnapshot;
   }
+
+  if (f.kind === "polyline") {
+    const positions = (f as any).geometry.positions as Cesium.Cartesian3[];
+    const cloned = positions.map((p) => Cesium.Cartesian3.clone(p));
+    return {
+      ...f,
+      geometry: { ...(f as any).geometry, positions: cloned },
+      meta: f.meta ? { ...f.meta } : undefined,
+      properties: f.properties ? { ...f.properties } : undefined,
+    } as FeatureSnapshot;
+  }
+
+  if (f.kind === "point") {
+    const position = (f as any).geometry.position as Cesium.Cartesian3;
+    return {
+      ...f,
+      geometry: { ...(f as any).geometry, position: Cesium.Cartesian3.clone(position) },
+      meta: f.meta ? { ...f.meta } : undefined,
+      properties: f.properties ? { ...f.properties } : undefined,
+    } as FeatureSnapshot;
+  }
+
   return {
     ...f,
     meta: f.meta ? { ...f.meta } : undefined,

@@ -1,6 +1,8 @@
 import * as Cesium from "cesium";
 import { PickService } from "./viewer/PickService";
 import { PolygonDrawTool } from "./viewer/PolygonDrawTool";
+import { PolylineDrawTool } from "./viewer/PolylineDrawTool";
+import { PointDrawTool } from "./viewer/PointDrawTool";
 import {
   geojsonFeatureCollectionFromFeatures,
   polygonFeaturesFromGeoJSON,
@@ -41,6 +43,7 @@ export function createApp(mountEl: HTMLElement) {
     </div>
 
     <div class="row">
+      <label class="badge"><b>绘制类型：</b><select id="drawKind"><option value="polygon">Polygon</option><option value="polyline">Polyline</option><option value="point">Point</option></select></label>
       <button class="btn primary" id="btnStart">开始绘制</button>
       <button class="btn" id="btnFinish">完成（提交，可 Undo）</button>
       <button class="btn" id="btnUndoPoint">撤销加点</button>
@@ -162,26 +165,52 @@ export function createApp(mountEl: HTMLElement) {
 
   // Stage 5.2: Feature model is the single source of truth.
   const store = new FeatureStore();
-  const featureLayer = new CesiumFeatureLayer(viewer, store, {
-    material: new Cesium.ColorMaterialProperty(
-      Cesium.Color.CYAN.withAlpha(0.25)
-    ),
-    outlineColor: Cesium.Color.CYAN,
-  });
 
-  const draw = new PolygonDrawTool(viewer, pick, stack, store, {
+  // Render layer (Feature -> Entity)
+  const featureLayer = new CesiumFeatureLayer(store, {
+    name: "feature-layer",
+    polygonStyle: {
+      material: new Cesium.ColorMaterialProperty(Cesium.Color.CYAN.withAlpha(0.25)),
+      outlineColor: Cesium.Color.CYAN,
+    },
+    polylineStyle: {
+      material: new Cesium.ColorMaterialProperty(Cesium.Color.YELLOW.withAlpha(0.9)),
+      width: 3,
+    },
+    pointStyle: {
+      color: Cesium.Color.YELLOW,
+      pixelSize: 10,
+    },
+  });
+  featureLayer.mount(viewer);
+
+  // Draw tools
+  const drawPolygon = new PolygonDrawTool(viewer, pick, stack, store, {
     onNotice: setNotice,
-    polygonMaterial: new Cesium.ColorMaterialProperty(
-      Cesium.Color.CYAN.withAlpha(0.25)
-    ),
+    polygonMaterial: new Cesium.ColorMaterialProperty(Cesium.Color.CYAN.withAlpha(0.25)),
     outlineColor: Cesium.Color.CYAN.withAlpha(0.95),
     pointColor: Cesium.Color.YELLOW.withAlpha(0.95),
   });
 
-  const edit = new PolygonEditTool(viewer, featureLayer, store, pick, stack, () => draw.state === "drawing", { onNotice: setNotice });
+  const drawPolyline = new PolylineDrawTool(viewer, featureLayer.ds, pick, stack, store, { onNotice: setNotice });
+  const drawPoint = new PointDrawTool(viewer, featureLayer.ds, pick, stack, store, { onNotice: setNotice });
 
-  // Stage 5.1: Use a single session as the orchestration boundary.
-  const session = new EditorSession(draw, edit, pick, stack);
+  // Edit tool (currently polygon-only selection; point/polyline will be selectable in stage 6.2)
+  const edit = new PolygonEditTool(
+    viewer,
+    featureLayer,
+    store,
+    pick,
+    stack,
+    () =>
+      drawPolygon.state === "drawing" ||
+      drawPolyline.getState() === "drawing" ||
+      drawPoint.getState() === "drawing",
+    { onNotice: setNotice }
+  );
+
+  // Use a single session as the orchestration boundary.
+  const session = new EditorSession(stack, store, drawPolygon, drawPolyline, drawPoint, edit);
 
   const $ = <T extends HTMLElement>(id: string) =>
     document.getElementById(id) as T;
@@ -310,8 +339,18 @@ export function createApp(mountEl: HTMLElement) {
   function refreshStatus() {
     const st = session.state;
     stateText.textContent = st.mode;
-    ptCount.textContent = String(draw.pointCount);
-    committedCount.textContent = String(draw.committedCount);
+    ptCount.textContent = String(
+      st.mode === "drawing"
+        ? st.drawingKind === "polygon"
+          ? drawPolygon.pointCount
+          : st.drawingKind === "polyline"
+            ? drawPolyline.pointCount
+            : st.drawingKind === "point"
+              ? drawPoint.pointCount
+              : 0
+        : 0
+    );
+    committedCount.textContent = String(store.size);
     stateDot.classList.toggle("off", st.mode === "idle");
 
     selectedId.textContent = edit.selectedEntityId ?? "-";
@@ -444,7 +483,10 @@ export function createApp(mountEl: HTMLElement) {
   });
   refreshStatus();
 
-  $("btnStart").addEventListener("click", () => session.startDrawing());
+  $("btnStart").addEventListener("click", () => {
+    const kind = ($("drawKind") as HTMLSelectElement).value as any;
+    session.startDrawing(kind);
+  });
   $("btnFinish").addEventListener("click", () => session.finishDrawing());
   $("btnUndoPoint").addEventListener("click", () => session.undoDrawPoint());
   $("btnCancel").addEventListener("click", () => session.cancelDrawing());
