@@ -9,7 +9,7 @@ import type { CommandStack } from "../viewer/commands/CommandStack";
 import type { PolygonDrawTool } from "../viewer/PolygonDrawTool";
 import type { PolylineDrawTool } from "../viewer/PolylineDrawTool";
 import type { PointDrawTool } from "../viewer/PointDrawTool";
-import type { PolygonEditTool } from "../viewer/edit/PolygonEditTool";
+import type { FeatureEditTool } from "../viewer/edit/FeatureEditTool";
 import type { FeatureStore } from "../features/store";
 
 type Listener = () => void;
@@ -36,7 +36,7 @@ export class EditorSession {
     private readonly drawPolygon: PolygonDrawTool,
     private readonly drawPolyline: PolylineDrawTool,
     private readonly drawPoint: PointDrawTool,
-    private readonly edit: PolygonEditTool
+    private readonly edit: FeatureEditTool
   ) {}
 
   get state(): EditorState {
@@ -55,7 +55,9 @@ export class EditorSession {
     }
 
     const selectedId = this.edit.selectedEntityId ?? null;
-    const selectedKind = selectedId ? ((this.store.get(selectedId)?.kind as any) ?? null) : null;
+    const selectedKind = selectedId
+      ? ((this.store.get(selectedId)?.kind as any) ?? null)
+      : null;
     const mode = selectedId ? "editing" : "idle";
     return { ...this._state, mode, drawingKind: null, selectedId, selectedKind };
   }

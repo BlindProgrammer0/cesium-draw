@@ -1,4 +1,10 @@
-import type { Feature, FeatureId, PolygonFeature } from "./types";
+import type {
+  Feature,
+  FeatureId,
+  PointFeature,
+  PolylineFeature,
+  PolygonFeature,
+} from "./types";
 
 export type FeatureEvent =
   | { type: "upsert"; feature: Feature }
@@ -49,6 +55,18 @@ export class FeatureStore {
 
   get(id: FeatureId): Feature | undefined {
     return this.map.get(id);
+  }
+
+  getPoint(id: FeatureId): PointFeature | undefined {
+    const f = this.map.get(id);
+    if (!f || f.kind !== "point") return undefined;
+    return f as PointFeature;
+  }
+
+  getPolyline(id: FeatureId): PolylineFeature | undefined {
+    const f = this.map.get(id);
+    if (!f || f.kind !== "polyline") return undefined;
+    return f as PolylineFeature;
   }
 
   getPolygon(id: FeatureId): PolygonFeature | undefined {

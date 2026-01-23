@@ -8,7 +8,7 @@ import {
   polygonFeaturesFromGeoJSON,
 } from "./features/geojson";
 import { CommandStack } from "./viewer/commands/CommandStack";
-import { PolygonEditTool } from "./viewer/edit/PolygonEditTool";
+import { FeatureEditTool } from "./viewer/edit/FeatureEditTool";
 import { EditorSession } from "./editor/EditorSession";
 import { FeatureStore } from "./features/store";
 import { CesiumFeatureLayer } from "./features/CesiumFeatureLayer";
@@ -53,7 +53,7 @@ export function createApp(mountEl: HTMLElement) {
       <button class="btn" id="btnRedoCmd">Redo</button>
 
       <button class="btn" id="btnClearCommitted">清空已提交（可 Undo）</button>
-      <button class="btn danger" id="btnDeleteSelected">删除选中 Polygon（可 Undo）</button>
+      <button class="btn danger" id="btnDeleteSelected">删除选中要素（可 Undo）</button>
       <button class="btn danger" id="btnDeleteVertex">删除选中顶点（可 Undo）</button>
       <button class="btn" id="btnDeselect">取消选中</button>
       <button class="btn" id="btnExport">导出 GeoJSON</button>
@@ -195,8 +195,8 @@ export function createApp(mountEl: HTMLElement) {
   const drawPolyline = new PolylineDrawTool(viewer, featureLayer.ds, pick, stack, store, { onNotice: setNotice });
   const drawPoint = new PointDrawTool(viewer, featureLayer.ds, pick, stack, store, { onNotice: setNotice });
 
-  // Edit tool (currently polygon-only selection; point/polyline will be selectable in stage 6.2)
-  const edit = new PolygonEditTool(
+  // Stage 6.2: unified edit tool for point/polyline/polygon
+  const edit = new FeatureEditTool(
     viewer,
     featureLayer,
     store,
@@ -353,7 +353,9 @@ export function createApp(mountEl: HTMLElement) {
     committedCount.textContent = String(store.size);
     stateDot.classList.toggle("off", st.mode === "idle");
 
-    selectedId.textContent = edit.selectedEntityId ?? "-";
+    selectedId.textContent = edit.selectedEntityId
+      ? `${edit.selectedEntityId} (${edit.selectedEntityKind ?? "-"})`
+      : "-";
     activeVertex.textContent =
       edit.activeVertexIndex === null ? "-" : String(edit.activeVertexIndex);
 
@@ -500,7 +502,7 @@ export function createApp(mountEl: HTMLElement) {
   });
 
   $("btnDeleteSelected").addEventListener("click", () => {
-    session.deleteSelectedPolygon();
+    session.deleteSelected();
     geojsonOut.value = "";
   });
 
