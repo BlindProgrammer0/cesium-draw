@@ -11,6 +11,8 @@ import {
 import { CommandStack } from "./viewer/commands/CommandStack";
 import { FeatureEditTool } from "./viewer/edit/FeatureEditTool";
 import { ToolController } from "./editor/ToolController";
+import { SelectionManager } from "./editor/selection/SelectionManager";
+import { PickResolver } from "./editor/pick/PickResolver";
 import { FeatureStore } from "./features/store";
 import { CesiumFeatureLayer } from "./features/CesiumFeatureLayer";
 import { ReplaceAllFeaturesCommand, UpsertManyFeaturesCommand } from "./features/commands";
@@ -146,6 +148,9 @@ export function createApp(mountEl: HTMLElement) {
   viewer.scene.globe.depthTestAgainstTerrain = false;
 
   const pick = new PickService(viewer);
+  const selection = new SelectionManager();
+  const pickResolver = new PickResolver(viewer);
+
 
   const interactionLock = new InteractionLock(viewer);
 
@@ -214,7 +219,7 @@ export function createApp(mountEl: HTMLElement) {
   );
 
   // Stage 6.3: use ToolController as the single orchestration boundary.
-  const controller = new ToolController(stack, store, drawPolygon, drawPolyline, drawPoint, edit);
+  const controller = new ToolController(stack, store, selection, drawPolygon, drawPolyline, drawPoint, edit);
 
   const $ = <T extends HTMLElement>(id: string) =>
     document.getElementById(id) as T;

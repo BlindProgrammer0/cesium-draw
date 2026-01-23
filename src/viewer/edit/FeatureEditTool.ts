@@ -13,6 +13,8 @@ import { validatePolygonPositions } from "../../features/validation/polygon";
 import { FeatureSpatialIndex } from "../../features/spatial/FeatureSpatialIndex";
 import { PickService } from "../PickService";
 import type { CommandStack } from "../commands/CommandStack";
+import { SelectionManager } from "../../editor/selection/SelectionManager";
+import { PickResolver } from "../../editor/pick/PickResolver";
 import { InteractionLock } from "../InteractionLock";
 import { SnapIndicator } from "../snap/SnapIndicator";
 import { SnappingEngine } from "../snap/SnappingEngine";
@@ -84,6 +86,8 @@ export class FeatureEditTool {
   constructor(
     private readonly viewer: Cesium.Viewer,
     private readonly interactionLock: InteractionLock,
+    private readonly selection: SelectionManager,
+    private readonly pickResolver: PickResolver,
     private readonly layer: CesiumFeatureLayer,
     private readonly store: FeatureStore,
     private readonly pick: PickService,
@@ -142,22 +146,21 @@ export class FeatureEditTool {
         if (this.isDrawing()) return;
         if (this.dragMode === "none") this.snapIndicator.hide();
 
-        const entity = this.pick.pickEntity(movement.position);
-        if (!entity) {
-          this.deselect();
+        const hit = this.pickResolver.resolve(movement.position, {
+          selectedId: this.selection.getPrimaryId(),
+        });
+
+        if (hit.type === "handle") {
+          this.beginHandleDrag(movement.position, {
+            __type: "handle",
+            __ownerId: hit.ownerId,
+            __index: hit.index ?? 0,
+          });
           return;
         }
-        const props = this.getProps(entity);
-        if (props?.__type === "snap-indicator") return;
 
-        if (props?.__type === "handle") {
-          this.beginHandleDrag(movement.position, props);
-          return;
-        }
-
-        const fid = props?.__featureId;
-        if (typeof fid === "string") {
-          this.select(fid);
+        if (hit.type === "feature") {
+          this.select(hit.featureId);
           return;
         }
 
@@ -171,7 +174,11 @@ export class FeatureEditTool {
       (movement: any) => {
         if (this.isDrawing()) return;
 
-        const fid = this.pick.pickFeatureId(movement.position);
+        const hit = this.pickResolver.resolve(movement.position, {
+          selectedId: this.selection.getPrimaryId(),
+        });
+        const fid =
+          hit.type === "handle" ? hit.ownerId : hit.type === "feature" ? hit.featureId : null;
         if (!fid) return;
 
         if (this.selectedId !== fid) this.select(fid);
@@ -404,7 +411,7 @@ export class FeatureEditTool {
   }
 
   get selectedEntityId() {
-    return this.selectedId;
+    return this.selection.getPrimaryId();
   }
   get selectedEntityKind() {
     return this.selectedKind;
@@ -500,7 +507,9 @@ export class FeatureEditTool {
     this.deselect(false);
 
     const feature = this.store.get(id);
+    this.selection.selectOne(id);
     if (!feature) {
+      this.selection.clear();
       this.selectedId = null;
       this.selectedKind = null;
       this.emit();
@@ -509,11 +518,14 @@ export class FeatureEditTool {
 
     const e = this.layer.getEntity(id);
     if (!e) {
+      this.selection.clear();
       this.selectedId = null;
       this.selectedKind = null;
       this.emit();
       return;
     }
+
+    this.selection.selectOne(id);
 
     if (!this.originalStyle.has(id)) {
       this.originalStyle.set(id, {
@@ -554,6 +566,7 @@ export class FeatureEditTool {
   }
 
   deselect(emit = true) {
+    this.selection.clear();
     // Ensure we exit any in-flight edit transaction.
     this.cancelDragTransaction();
     if (this.selectedId) {

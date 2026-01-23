@@ -114,16 +114,13 @@ export class CesiumFeatureLayer {
     if (!entity) {
       entity = this.ds.entities.add(new Cesium.Entity());
       this.entityByFeature.set(feature.id, entity);
-      entity.properties = new Cesium.PropertyBag({
-        __featureId: feature.id,
-      }) as any;
-    } else {
-      // Ensure properties exist
-      if (!entity.properties)
-        entity.properties = new Cesium.PropertyBag({
-          __featureId: feature.id,
-        }) as any;
     }
+
+    // Keep properties normalized for picking and debugging.
+    entity.properties = new Cesium.PropertyBag({
+      __featureId: feature.id,
+      __kind: feature.kind,
+    }) as any;
 
     entity.name = feature.meta?.name ?? entity.name;
 

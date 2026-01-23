@@ -4,6 +4,7 @@ import type { PolygonDrawTool } from "../viewer/PolygonDrawTool";
 import type { PolylineDrawTool } from "../viewer/PolylineDrawTool";
 import type { PointDrawTool } from "../viewer/PointDrawTool";
 import type { FeatureEditTool } from "../viewer/edit/FeatureEditTool";
+import type { SelectionManager } from "./selection/SelectionManager";
 
 export type ToolMode = "idle" | "draw" | "edit";
 export type DrawKind = "polygon" | "polyline" | "point";
@@ -30,6 +31,7 @@ export class ToolController {
   constructor(
     private readonly stack: CommandStack,
     private readonly store: FeatureStore,
+    private readonly selection: SelectionManager,
     private readonly drawPolygon: PolygonDrawTool,
     private readonly drawPolyline: PolylineDrawTool,
     private readonly drawPoint: PointDrawTool,
@@ -45,7 +47,7 @@ export class ToolController {
 
   get mode(): ToolMode {
     if (this.isDrawing()) return "draw";
-    if (this.edit.selectedEntityId) return "edit";
+    if (this.selection.getPrimaryId()) return "edit";
     return "idle";
   }
 
