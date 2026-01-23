@@ -13,6 +13,7 @@ import { validatePolygonPositions } from "../../features/validation/polygon";
 import { FeatureSpatialIndex } from "../../features/spatial/FeatureSpatialIndex";
 import { PickService } from "../PickService";
 import type { CommandStack } from "../commands/CommandStack";
+import { InteractionLock } from "../InteractionLock";
 import { SnapIndicator } from "../snap/SnapIndicator";
 import { SnappingEngine } from "../snap/SnappingEngine";
 import type { SnapSourcesEnabled, SnapTypesEnabled } from "../snap/SnapTypes";
@@ -78,8 +79,11 @@ export class FeatureEditTool {
   private readonly snapIndicator: SnapIndicator;
   private readonly spatialIndex: FeatureSpatialIndex;
 
+  private releaseDragLock: (() => void) | null = null;
+
   constructor(
     private readonly viewer: Cesium.Viewer,
+    private readonly interactionLock: InteractionLock,
     private readonly layer: CesiumFeatureLayer,
     private readonly store: FeatureStore,
     private readonly pick: PickService,
@@ -184,7 +188,7 @@ export class FeatureEditTool {
           this.dragBeforePositions = clonePositions(feat.geometry.positions);
           this.dragBeforeFeature = snapshotFeature(feat);
           this.dragStartAnchor = Cesium.Cartesian3.clone(anchor);
-          this.lockCamera();
+          this.acquireDragLock();
           return;
         }
 
@@ -196,7 +200,7 @@ export class FeatureEditTool {
           this.dragBeforePositions = clonePositions(feat.geometry.positions);
           this.dragBeforeFeature = snapshotFeature(feat);
           this.dragStartAnchor = Cesium.Cartesian3.clone(anchor);
-          this.lockCamera();
+          this.acquireDragLock();
           return;
         }
 
@@ -208,7 +212,7 @@ export class FeatureEditTool {
           this.dragBeforePosition = Cesium.Cartesian3.clone(feat.geometry.position);
           this.dragBeforeFeature = snapshotFeature(feat);
           this.dragStartAnchor = Cesium.Cartesian3.clone(anchor);
-          this.lockCamera();
+          this.acquireDragLock();
         }
       },
       Cesium.ScreenSpaceEventType.LEFT_DOWN,
@@ -324,7 +328,7 @@ export class FeatureEditTool {
       this.dragStartAnchor = null;
       this.dragPreviewPositions = null;
       this.dragPreviewPosition = null;
-      this.unlockCamera();
+      this.releaseDragLockNow();
 
       if (!before) return;
 
@@ -376,7 +380,6 @@ export class FeatureEditTool {
     }, Cesium.ScreenSpaceEventType.LEFT_UP);
 
     window.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") this.deselect();
       if ((e.key === "Delete" || e.key === "Backspace") && !this.isDrawing()) {
         if (this.selectedId && this.activeHandleIndex !== null) {
           this.deleteActiveVertex();
@@ -388,6 +391,7 @@ export class FeatureEditTool {
   }
 
   destroy() {
+    this.releaseDragLockNow();
     this.handler?.destroy();
     this.snapIndicator?.destroy();
   }
@@ -550,6 +554,8 @@ export class FeatureEditTool {
   }
 
   deselect(emit = true) {
+    // Ensure we exit any in-flight edit transaction.
+    this.cancelDragTransaction();
     if (this.selectedId) {
       const e = this.layer.getEntity(this.selectedId);
       const st = this.originalStyle.get(this.selectedId);
@@ -575,6 +581,43 @@ export class FeatureEditTool {
     this.clearHandles();
     this.snapIndicator.hide();
     if (emit) this.emit();
+  }
+
+  /**
+   * Cancel current action.
+   * - If dragging: rollback preview and keep selection
+   * - Otherwise: deselect
+   */
+  cancel() {
+    if (this.dragMode !== "none") {
+      this.cancelDragTransaction();
+      this.refreshHandles();
+      this.emit();
+      return;
+    }
+    this.deselect();
+  }
+
+  private cancelDragTransaction() {
+    if (this.dragMode === "none") return;
+
+    const before = this.dragBeforeFeature;
+
+    // Reset drag state first
+    this.dragMode = "none";
+    this.dragIndex = null;
+    this.dragBeforePositions = null;
+    this.dragBeforePosition = null;
+    this.dragBeforeFeature = null;
+    this.dragStartAnchor = null;
+    this.dragPreviewPositions = null;
+    this.dragPreviewPosition = null;
+    this.releaseDragLockNow();
+
+    // Roll back preview if we have a snapshot
+    if (before) {
+      this.store.upsert(before);
+    }
   }
 
   // ---------- delete ----------
@@ -739,7 +782,7 @@ export class FeatureEditTool {
       if (!feat) return;
       this.dragBeforeFeature = snapshotFeature(feat);
       this.dragBeforePosition = Cesium.Cartesian3.clone(feat.geometry.position);
-      this.lockCamera();
+      this.acquireDragLock();
       return;
     }
 
@@ -750,7 +793,7 @@ export class FeatureEditTool {
     if (!feat) return;
     this.dragBeforeFeature = snapshotFeature(feat);
     this.dragBeforePositions = clonePositions(feat.geometry.positions);
-    this.lockCamera();
+    this.acquireDragLock();
   }
 
   // ---------- preview apply ----------
@@ -959,23 +1002,24 @@ export class FeatureEditTool {
     return entity.properties?.getValue(Cesium.JulianDate.now());
   }
 
-  // ---------- camera lock ----------
-  private lockCamera() {
-    const c = this.viewer.scene.screenSpaceCameraController;
-    c.enableRotate = false;
-    c.enableTilt = false;
-    c.enableTranslate = false;
-    c.enableZoom = false;
-    c.enableLook = false;
+  // ---------- interaction lock ----------
+  private acquireDragLock() {
+    if (this.releaseDragLock) return;
+    // Disable camera controls during drag to avoid event conflicts.
+    this.releaseDragLock = this.interactionLock.acquire("edit-drag", {
+      enableRotate: false,
+      enableTranslate: false,
+      enableZoom: false,
+      enableTilt: false,
+      enableLook: false,
+    });
   }
 
-  private unlockCamera() {
-    const c = this.viewer.scene.screenSpaceCameraController;
-    c.enableRotate = true;
-    c.enableTilt = true;
-    c.enableTranslate = true;
-    c.enableZoom = true;
-    c.enableLook = true;
+  private releaseDragLockNow() {
+    if (!this.releaseDragLock) return;
+    const release = this.releaseDragLock;
+    this.releaseDragLock = null;
+    release();
   }
 }
 

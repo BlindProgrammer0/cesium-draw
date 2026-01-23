@@ -7,6 +7,7 @@ import { AddFeatureCommand } from "../features/commands";
 import { validatePointPosition } from "../features/validation";
 import { SnappingEngine } from "./snap/SnappingEngine";
 import { FeatureSpatialIndex } from "../features/spatial/FeatureSpatialIndex";
+import { InteractionLock } from "./InteractionLock";
 
 export type PointDrawState = "idle" | "drawing";
 
@@ -24,10 +25,13 @@ export class PointDrawTool {
   private index: FeatureSpatialIndex;
   private snapper: SnappingEngine;
 
+  private releaseDrawLock: (() => void) | null = null;
+
   constructor(
     private readonly viewer: Cesium.Viewer,
     private readonly committedDs: Cesium.CustomDataSource,
     private readonly pick: PickService,
+    private readonly interactionLock: InteractionLock,
     private readonly stack: CommandStack,
     private readonly store: FeatureStore,
     private readonly opts?: PointDrawToolOptions
@@ -40,7 +44,7 @@ export class PointDrawTool {
   }
 
   destroy() {
-    this.disable();
+    this.cancel();
     this.handler.destroy();
     this.index.destroy();
   }
@@ -58,6 +62,12 @@ export class PointDrawTool {
     this.state = "drawing";
     this.enable();
     this.ensurePreview();
+
+    if (!this.releaseDrawLock) {
+      this.releaseDrawLock = this.interactionLock.acquire("draw", {
+        enableTranslate: false,
+      });
+    }
   }
 
   finish() {
@@ -80,6 +90,12 @@ export class PointDrawTool {
       this.preview = null;
     }
     this.disable();
+
+    if (this.releaseDrawLock) {
+      const r = this.releaseDrawLock;
+      this.releaseDrawLock = null;
+      r();
+    }
   }
 
   private ensurePreview() {

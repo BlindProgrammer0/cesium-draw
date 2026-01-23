@@ -3,13 +3,14 @@ import { PickService } from "./viewer/PickService";
 import { PolygonDrawTool } from "./viewer/PolygonDrawTool";
 import { PolylineDrawTool } from "./viewer/PolylineDrawTool";
 import { PointDrawTool } from "./viewer/PointDrawTool";
+import { InteractionLock } from "./viewer/InteractionLock";
 import {
   geojsonFeatureCollectionFromFeatures,
   polygonFeaturesFromGeoJSON,
 } from "./features/geojson";
 import { CommandStack } from "./viewer/commands/CommandStack";
 import { FeatureEditTool } from "./viewer/edit/FeatureEditTool";
-import { EditorSession } from "./editor/EditorSession";
+import { ToolController } from "./editor/ToolController";
 import { FeatureStore } from "./features/store";
 import { CesiumFeatureLayer } from "./features/CesiumFeatureLayer";
 import { ReplaceAllFeaturesCommand, UpsertManyFeaturesCommand } from "./features/commands";
@@ -146,6 +147,8 @@ export function createApp(mountEl: HTMLElement) {
 
   const pick = new PickService(viewer);
 
+  const interactionLock = new InteractionLock(viewer);
+
   const clickHandler = new Cesium.ScreenSpaceEventHandler(viewer.canvas);
   clickHandler.setInputAction(
     (movement: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
@@ -185,19 +188,20 @@ export function createApp(mountEl: HTMLElement) {
   featureLayer.mount(viewer);
 
   // Draw tools
-  const drawPolygon = new PolygonDrawTool(viewer, pick, stack, store, {
+  const drawPolygon = new PolygonDrawTool(viewer, interactionLock, pick, stack, store, {
     onNotice: setNotice,
     polygonMaterial: new Cesium.ColorMaterialProperty(Cesium.Color.CYAN.withAlpha(0.25)),
     outlineColor: Cesium.Color.CYAN.withAlpha(0.95),
     pointColor: Cesium.Color.YELLOW.withAlpha(0.95),
   });
 
-  const drawPolyline = new PolylineDrawTool(viewer, featureLayer.ds, pick, stack, store, { onNotice: setNotice });
-  const drawPoint = new PointDrawTool(viewer, featureLayer.ds, pick, stack, store, { onNotice: setNotice });
+  const drawPolyline = new PolylineDrawTool(viewer, featureLayer.ds, pick, interactionLock, stack, store, { onNotice: setNotice });
+  const drawPoint = new PointDrawTool(viewer, featureLayer.ds, pick, interactionLock, stack, store, { onNotice: setNotice });
 
   // Stage 6.2: unified edit tool for point/polyline/polygon
   const edit = new FeatureEditTool(
     viewer,
+    interactionLock,
     featureLayer,
     store,
     pick,
@@ -209,8 +213,8 @@ export function createApp(mountEl: HTMLElement) {
     { onNotice: setNotice }
   );
 
-  // Use a single session as the orchestration boundary.
-  const session = new EditorSession(stack, store, drawPolygon, drawPolyline, drawPoint, edit);
+  // Stage 6.3: use ToolController as the single orchestration boundary.
+  const controller = new ToolController(stack, store, drawPolygon, drawPolyline, drawPoint, edit);
 
   const $ = <T extends HTMLElement>(id: string) =>
     document.getElementById(id) as T;
@@ -337,21 +341,22 @@ export function createApp(mountEl: HTMLElement) {
   const gridSizeVal = $("gridSizeVal");
 
   function refreshStatus() {
-    const st = session.state;
-    stateText.textContent = st.mode;
+    const mode = controller.mode;
+    const kind = controller.drawingKind;
+    stateText.textContent = mode;
     ptCount.textContent = String(
-      st.mode === "drawing"
-        ? st.drawingKind === "polygon"
+      mode === "draw"
+        ? kind === "polygon"
           ? drawPolygon.pointCount
-          : st.drawingKind === "polyline"
+          : kind === "polyline"
             ? drawPolyline.pointCount
-            : st.drawingKind === "point"
+            : kind === "point"
               ? drawPoint.pointCount
               : 0
         : 0
     );
     committedCount.textContent = String(store.size);
-    stateDot.classList.toggle("off", st.mode === "idle");
+    stateDot.classList.toggle("off", mode === "idle");
 
     selectedId.textContent = edit.selectedEntityId
       ? `${edit.selectedEntityId} (${edit.selectedEntityKind ?? "-"})`
@@ -477,9 +482,8 @@ export function createApp(mountEl: HTMLElement) {
   edit.setSnapThresholdPx(Number(snapThreshold.value));
   edit.setGridSizeMeters(Number(gridSize.value));
 
-  // Session-driven refresh (stage 5). We keep the existing per-tool hooks,
-  // but centralize UI invalidation through the session boundary.
-  session.onChange(() => {
+  // Controller-driven refresh (stage 6.3): centralize UI invalidation.
+  controller.onChange(() => {
     if (edit.selectedEntityId) edit.refreshHandles();
     refreshStatus();
   });
@@ -487,31 +491,31 @@ export function createApp(mountEl: HTMLElement) {
 
   $("btnStart").addEventListener("click", () => {
     const kind = ($("drawKind") as HTMLSelectElement).value as any;
-    session.startDrawing(kind);
+    controller.startDrawing(kind);
   });
-  $("btnFinish").addEventListener("click", () => session.finishDrawing());
-  $("btnUndoPoint").addEventListener("click", () => session.undoDrawPoint());
-  $("btnCancel").addEventListener("click", () => session.cancelDrawing());
+  $("btnFinish").addEventListener("click", () => controller.finishDrawing());
+  $("btnUndoPoint").addEventListener("click", () => controller.undoDrawPoint());
+  $("btnCancel").addEventListener("click", () => controller.cancelDrawing());
 
-  btnUndoCmd.addEventListener("click", () => session.undo());
-  btnRedoCmd.addEventListener("click", () => session.redo());
+  btnUndoCmd.addEventListener("click", () => controller.undo());
+  btnRedoCmd.addEventListener("click", () => controller.redo());
 
   $("btnClearCommitted").addEventListener("click", () => {
-    session.clearCommitted();
+    controller.clearCommitted();
     geojsonOut.value = "";
   });
 
   $("btnDeleteSelected").addEventListener("click", () => {
-    session.deleteSelected();
+    controller.deleteSelected();
     geojsonOut.value = "";
   });
 
   $("btnDeleteVertex").addEventListener("click", () => {
-    session.deleteActiveVertex();
+    controller.deleteActiveVertex();
     geojsonOut.value = "";
   });
 
-  $("btnDeselect").addEventListener("click", () => session.deselect());
+  $("btnDeselect").addEventListener("click", () => controller.deselect());
 
   // Stage 5.4: Import GeoJSON.
   btnImport.addEventListener("click", () => {
@@ -554,7 +558,7 @@ export function createApp(mountEl: HTMLElement) {
     if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
-      stateText.textContent = session.state.mode + " (copied)";
+      stateText.textContent = controller.mode + " (copied)";
       setTimeout(refreshStatus, 800);
     } catch {
       alert("复制失败：浏览器可能未授权剪贴板权限。");
@@ -566,5 +570,5 @@ export function createApp(mountEl: HTMLElement) {
     duration: 0.8,
   });
 
-  return { viewer, session, draw, edit, pick, stack };
+  return { viewer, controller, edit, pick, stack };
 }

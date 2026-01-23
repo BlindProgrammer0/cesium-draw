@@ -5,6 +5,7 @@ import { createPolygonFeature } from "../features/types";
 import { AddFeatureCommand, ClearAllFeaturesCommand } from "../features/commands";
 import type { FeatureStore } from "../features/store";
 import { validatePolygonPositions } from "../features/validation";
+import { InteractionLock } from "./InteractionLock";
 
 export type PolygonDrawState = "idle" | "drawing" | "committed";
 
@@ -34,8 +35,11 @@ export class PolygonDrawTool {
   private onPointListeners: Listener[] = [];
   private onCommittedListeners: Listener[] = [];
 
+  private releaseDrawLock: (() => void) | null = null;
+
   constructor(
     private readonly viewer: Cesium.Viewer,
+    private readonly interactionLock: InteractionLock,
     private readonly pick: PickService,
     private readonly stack: CommandStack,
     private readonly store: FeatureStore,
@@ -64,6 +68,13 @@ export class PolygonDrawTool {
     this.emitState();
 
     this.handler = new Cesium.ScreenSpaceEventHandler(this.viewer.canvas);
+
+    // Avoid right-drag translate conflicting with RIGHT_CLICK finish.
+    if (!this.releaseDrawLock) {
+      this.releaseDrawLock = this.interactionLock.acquire("draw", {
+        enableTranslate: false,
+      });
+    }
 
     this.handler.setInputAction((movement: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
       const p = this.pick.pickPosition(movement.position);
@@ -102,6 +113,12 @@ export class PolygonDrawTool {
     this.clearPointEntities();
     this.detachHandler();
 
+    if (this.releaseDrawLock) {
+      const r = this.releaseDrawLock;
+      this.releaseDrawLock = null;
+      r();
+    }
+
     this.state = "committed";
     this.emitState();
     this.emitPoints();
@@ -118,6 +135,12 @@ export class PolygonDrawTool {
     this.clearPointEntities();
     this.detachHandler();
     this.state = "idle";
+
+    if (this.releaseDrawLock) {
+      const r = this.releaseDrawLock;
+      this.releaseDrawLock = null;
+      r();
+    }
     this.emitState();
     this.emitPoints();
   }

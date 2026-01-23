@@ -7,6 +7,7 @@ import { AddFeatureCommand } from "../features/commands";
 import { validatePolylinePositions } from "../features/validation";
 import { SnappingEngine } from "./snap/SnappingEngine";
 import { FeatureSpatialIndex } from "../features/spatial/FeatureSpatialIndex";
+import { InteractionLock } from "./InteractionLock";
 
 export type PolylineDrawState = "idle" | "drawing";
 
@@ -25,10 +26,13 @@ export class PolylineDrawTool {
   private index: FeatureSpatialIndex;
   private snapper: SnappingEngine;
 
+  private releaseDrawLock: (() => void) | null = null;
+
   constructor(
     private readonly viewer: Cesium.Viewer,
     private readonly committedDs: Cesium.CustomDataSource,
     private readonly pick: PickService,
+    private readonly interactionLock: InteractionLock,
     private readonly stack: CommandStack,
     private readonly store: FeatureStore,
     private readonly opts?: PolylineDrawToolOptions
@@ -41,7 +45,7 @@ export class PolylineDrawTool {
   }
 
   destroy() {
-    this.disable();
+    this.cancel();
     this.handler.destroy();
     this.index.destroy();
   }
@@ -61,6 +65,13 @@ export class PolylineDrawTool {
     this.clearPreview();
     this.enable();
     this.ensureLine();
+
+    // Avoid right-drag translate conflicting with RIGHT_CLICK finish.
+    if (!this.releaseDrawLock) {
+      this.releaseDrawLock = this.interactionLock.acquire("draw", {
+        enableTranslate: false,
+      });
+    }
   }
 
   undoPoint() {
@@ -88,6 +99,12 @@ export class PolylineDrawTool {
     this.positions = [];
     this.clearPreview();
     this.disable();
+
+    if (this.releaseDrawLock) {
+      const r = this.releaseDrawLock;
+      this.releaseDrawLock = null;
+      r();
+    }
   }
 
   private ensureLine() {
