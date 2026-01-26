@@ -133,20 +133,49 @@ export class ToolController {
   }
 
   private onKeyDown(e: KeyboardEvent) {
-    if (e.key !== "Escape") return;
+    // Do not intercept key bindings while typing in an input/textarea or any
+    // contentEditable area.
+    if (isTextInputTarget(e.target)) return;
 
-    // Drawing has highest priority
+    // Drawing key bindings (highest priority)
     if (this.isDrawing()) {
-      this.cancelDrawing();
+      if (e.key === "Escape") {
+        this.cancelDrawing();
+        return;
+      }
+      if (e.key === "Enter") {
+        // Finish current draw
+        this.finishDrawing();
+        return;
+      }
+      if (e.key === "Backspace") {
+        // Undo last vertex while drawing (polyline/polygon)
+        e.preventDefault();
+        this.undoDrawPoint();
+        return;
+      }
       return;
     }
 
-    // Then cancel active edit transaction (drag) or deselect
-    this.edit.cancel();
-    this.emit();
+    // Edit / idle key bindings
+    if (e.key === "Escape") {
+      // Cancel active edit transaction (drag) or deselect.
+      this.edit.cancel();
+      this.emit();
+    }
   }
 
   private emit() {
     for (const fn of this.listeners) fn();
   }
+}
+
+function isTextInputTarget(target: EventTarget | null) {
+  if (!target) return false;
+  const el = target as HTMLElement;
+  const tag = (el.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return true;
+  // contentEditable
+  if ((el as any).isContentEditable) return true;
+  return false;
 }

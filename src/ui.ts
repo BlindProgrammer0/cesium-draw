@@ -15,10 +15,7 @@ import { SelectionManager } from "./editor/selection/SelectionManager";
 import { PickResolver } from "./editor/pick/PickResolver";
 import { FeatureStore } from "./features/store";
 import { CesiumFeatureLayer } from "./features/CesiumFeatureLayer";
-import {
-  ReplaceAllFeaturesCommand,
-  UpsertManyFeaturesCommand,
-} from "./features/commands";
+import { ReplaceAllFeaturesCommand, UpsertManyFeaturesCommand } from "./features/commands";
 import { validatePolygonPositions } from "./features/validation";
 
 export function createApp(mountEl: HTMLElement) {
@@ -129,6 +126,7 @@ export function createApp(mountEl: HTMLElement) {
     if (msg) noticeTimer = setTimeout(() => setNotice(""), 4000);
   };
 
+
   root.appendChild(container);
   root.appendChild(panel);
   mountEl.appendChild(root);
@@ -153,6 +151,7 @@ export function createApp(mountEl: HTMLElement) {
   const selection = new SelectionManager();
   const pickResolver = new PickResolver(viewer);
 
+
   const interactionLock = new InteractionLock(viewer);
 
   const clickHandler = new Cesium.ScreenSpaceEventHandler(viewer.canvas);
@@ -167,7 +166,7 @@ export function createApp(mountEl: HTMLElement) {
         h: c.height ?? 0,
       });
     },
-    Cesium.ScreenSpaceEventType.LEFT_CLICK,
+    Cesium.ScreenSpaceEventType.LEFT_CLICK
   );
 
   const stack = new CommandStack();
@@ -179,15 +178,11 @@ export function createApp(mountEl: HTMLElement) {
   const featureLayer = new CesiumFeatureLayer(store, {
     name: "feature-layer",
     polygonStyle: {
-      material: new Cesium.ColorMaterialProperty(
-        Cesium.Color.CYAN.withAlpha(0.25),
-      ),
+      material: new Cesium.ColorMaterialProperty(Cesium.Color.CYAN.withAlpha(0.25)),
       outlineColor: Cesium.Color.CYAN,
     },
     polylineStyle: {
-      material: new Cesium.ColorMaterialProperty(
-        Cesium.Color.YELLOW.withAlpha(0.9),
-      ),
+      material: new Cesium.ColorMaterialProperty(Cesium.Color.YELLOW.withAlpha(0.9)),
       width: 3,
     },
     pointStyle: {
@@ -198,38 +193,15 @@ export function createApp(mountEl: HTMLElement) {
   featureLayer.mount(viewer);
 
   // Draw tools
-  const drawPolygon = new PolygonDrawTool(
-    viewer,
-    interactionLock,
-    pick,
-    stack,
-    store,
-    {
-      onNotice: setNotice,
-      polygonMaterial: new Cesium.ColorMaterialProperty(
-        Cesium.Color.CYAN.withAlpha(0.25),
-      ),
-      outlineColor: Cesium.Color.CYAN.withAlpha(0.95),
-      pointColor: Cesium.Color.YELLOW.withAlpha(0.95),
-    },
-  );
+  const drawPolygon = new PolygonDrawTool(viewer, interactionLock, pick, stack, store, {
+    onNotice: setNotice,
+    polygonMaterial: new Cesium.ColorMaterialProperty(Cesium.Color.CYAN.withAlpha(0.25)),
+    outlineColor: Cesium.Color.CYAN.withAlpha(0.95),
+    pointColor: Cesium.Color.YELLOW.withAlpha(0.95),
+  });
 
-  const drawPolyline = new PolylineDrawTool(
-    viewer,
-    interactionLock,
-    pick,
-    stack,
-    store,
-    { onNotice: setNotice },
-  );
-  const drawPoint = new PointDrawTool(
-    viewer,
-    interactionLock,
-    pick,
-    stack,
-    store,
-    { onNotice: setNotice },
-  );
+  const drawPolyline = new PolylineDrawTool(viewer, interactionLock, pick, stack, store, { onNotice: setNotice });
+  const drawPoint = new PointDrawTool(viewer, interactionLock, pick, stack, store, { onNotice: setNotice });
 
   // Stage 6.2: unified edit tool for point/polyline/polygon
   const edit = new FeatureEditTool(
@@ -245,19 +217,11 @@ export function createApp(mountEl: HTMLElement) {
       drawPolygon.state === "drawing" ||
       drawPolyline.getState() === "drawing" ||
       drawPoint.getState() === "drawing",
-    { onNotice: setNotice },
+    { onNotice: setNotice }
   );
 
   // Stage 6.3: use ToolController as the single orchestration boundary.
-  const controller = new ToolController(
-    stack,
-    store,
-    selection,
-    drawPolygon,
-    drawPolyline,
-    drawPoint,
-    edit,
-  );
+  const controller = new ToolController(stack, store, selection, drawPolygon, drawPolyline, drawPoint, edit);
 
   const $ = <T extends HTMLElement>(id: string) =>
     document.getElementById(id) as T;
@@ -281,18 +245,11 @@ export function createApp(mountEl: HTMLElement) {
   geojsonFile.style.display = "none";
   panel.appendChild(geojsonFile);
 
-  const importGeoJSON = (
-    input: any,
-    strategy: "merge" | "append" | "overwrite",
-  ) => {
+  const importGeoJSON = (input: any, strategy: "merge" | "append" | "overwrite") => {
     const parsed = polygonFeaturesFromGeoJSON(input);
     if (parsed.length === 0) {
       setNotice("导入失败：未找到可导入的 Polygon/MultiPolygon。 ");
-      geojsonOut.value = JSON.stringify(
-        { strategy, ok: false, reason: "no-polygons" },
-        null,
-        2,
-      );
+      geojsonOut.value = JSON.stringify({ strategy, ok: false, reason: "no-polygons" }, null, 2);
       return;
     }
 
@@ -302,16 +259,10 @@ export function createApp(mountEl: HTMLElement) {
     for (const f of parsed) {
       incomingIds.set(f.id, (incomingIds.get(f.id) ?? 0) + 1);
       const v = validatePolygonPositions(f.geometry.positions);
-      if (!v.ok)
-        invalid.push({
-          id: f.id,
-          message: v.issues[0]?.message ?? "几何校验失败",
-        });
+      if (!v.ok) invalid.push({ id: f.id, message: v.issues[0]?.message ?? "几何校验失败" });
     }
 
-    const duplicatedIncoming = [...incomingIds.entries()]
-      .filter(([, c]) => c > 1)
-      .map(([id, c]) => ({ id, count: c }));
+    const duplicatedIncoming = [...incomingIds.entries()].filter(([, c]) => c > 1).map(([id, c]) => ({ id, count: c }));
     const conflicts = parsed.filter((f) => store.has(f.id)).map((f) => f.id);
 
     const report = {
@@ -321,12 +272,7 @@ export function createApp(mountEl: HTMLElement) {
       duplicatedIncomingCount: duplicatedIncoming.length,
       conflictCount: conflicts.length,
       willClear: strategy === "overwrite" ? store.size : 0,
-      willAdd:
-        strategy === "overwrite"
-          ? parsed.length
-          : strategy === "merge"
-            ? parsed.length - conflicts.length
-            : parsed.length,
+      willAdd: strategy === "overwrite" ? parsed.length : strategy === "merge" ? parsed.length - conflicts.length : parsed.length,
       willReplace: strategy === "merge" ? conflicts.length : 0,
       notes: [
         "导入仅支持 Polygon/MultiPolygon，且仅使用第一条外环（不处理洞）。",
@@ -371,20 +317,16 @@ export function createApp(mountEl: HTMLElement) {
 
     if (strategy === "overwrite") {
       stack.push(new ReplaceAllFeaturesCommand(store, features));
-      setNotice(
-        `覆盖导入：清空 ${report.willClear} 个并导入 ${features.length} 个（可 Undo）。`,
-      );
+      setNotice(`覆盖导入：清空 ${report.willClear} 个并导入 ${features.length} 个（可 Undo）。`);
     } else {
       stack.push(new UpsertManyFeaturesCommand(store, features));
-      setNotice(
-        `导入完成：${features.length} 个（${strategy === "append" ? "追加" : "合并"}，可 Undo）。`,
-      );
+      setNotice(`导入完成：${features.length} 个（${strategy === "append" ? "追加" : "合并"}，可 Undo）。`);
     }
 
     geojsonOut.value = JSON.stringify(
       geojsonFeatureCollectionFromFeatures(store.all()),
       null,
-      2,
+      2
     );
   };
   const btnImport = $("btnImport") as HTMLButtonElement;
@@ -418,7 +360,7 @@ export function createApp(mountEl: HTMLElement) {
             : kind === "point"
               ? drawPoint.pointCount
               : 0
-        : 0,
+        : 0
     );
     committedCount.textContent = String(store.size);
     stateDot.classList.toggle("off", mode === "idle");
@@ -486,15 +428,15 @@ export function createApp(mountEl: HTMLElement) {
   };
 
   snapEnabled.addEventListener("change", () =>
-    edit.setSnapEnabled(snapEnabled.checked),
+    edit.setSnapEnabled(snapEnabled.checked)
   );
 
   snapIndicator.addEventListener("change", () =>
-    edit.setSnapIndicatorEnabled(snapIndicator.checked),
+    edit.setSnapIndicatorEnabled(snapIndicator.checked)
   );
 
   snapToPolygons.addEventListener("change", () =>
-    edit.setSnapSources({ polygons: snapToPolygons.checked }),
+    edit.setSnapSources({ polygons: snapToPolygons.checked })
   );
 
   snapToGrid.addEventListener("change", () => {
@@ -537,10 +479,7 @@ export function createApp(mountEl: HTMLElement) {
   // Initial sync from UI
   edit.setSnapEnabled(snapEnabled.checked);
   edit.setSnapIndicatorEnabled(snapIndicator.checked);
-  edit.setSnapSources({
-    polygons: snapToPolygons.checked,
-    grid: snapToGrid.checked,
-  });
+  edit.setSnapSources({ polygons: snapToPolygons.checked, grid: snapToGrid.checked });
   edit.setSnapTypes({
     vertex: snapTypeVertex.checked,
     midpoint: snapTypeMid.checked,
@@ -587,8 +526,7 @@ export function createApp(mountEl: HTMLElement) {
 
   // Stage 5.4: Import GeoJSON.
   btnImport.addEventListener("click", () => {
-    const strategy =
-      (($("importStrategy") as HTMLSelectElement)?.value as any) ?? "merge";
+    const strategy = (($("importStrategy") as HTMLSelectElement)?.value as any) ?? "merge";
     const text = geojsonOut.value.trim();
     if (text) {
       try {
@@ -607,8 +545,7 @@ export function createApp(mountEl: HTMLElement) {
     if (!file) return;
     try {
       const text = await file.text();
-      const strategy =
-        (($("importStrategy") as HTMLSelectElement)?.value as any) ?? "merge";
+      const strategy = (($("importStrategy") as HTMLSelectElement)?.value as any) ?? "merge";
       importGeoJSON(JSON.parse(text), strategy);
     } catch {
       setNotice("导入失败：文件不是有效 JSON/GeoJSON。 ");
@@ -619,7 +556,7 @@ export function createApp(mountEl: HTMLElement) {
     geojsonOut.value = JSON.stringify(
       geojsonFeatureCollectionFromFeatures(store.all()),
       null,
-      2,
+      2
     );
   });
 
