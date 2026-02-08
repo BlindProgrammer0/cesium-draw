@@ -13,6 +13,8 @@ export type PointDrawState = DrawState;
 export type PointDrawToolOptions = BaseDrawToolOptions & {
   previewColor?: Cesium.Color;
   pixelSize?: number;
+  /** If true, a single LEFT_CLICK immediately commits the point. Default true. */
+  commitOnClick?: boolean;
 };
 
 export class PointDrawTool extends BaseDrawTool {
@@ -64,6 +66,11 @@ export class PointDrawTool extends BaseDrawTool {
     this.clearPointEntities();
     this.addVertexVisual(cp);
     this.emitPoints();
+
+    // Typical point drawing UX: click to commit.
+    if (this.toolOpts.commitOnClick ?? true) {
+      this.finish();
+    }
   }
 
   // no undo for point

@@ -6,7 +6,11 @@ import { AddFeatureCommand } from "../features/commands";
 import { validatePolylinePositions } from "../features/validation";
 import type { PickService } from "./PickService";
 import type { InteractionLock } from "./InteractionLock";
-import { BaseDrawTool, type BaseDrawToolOptions, type DrawState } from "./draw/BaseDrawTool";
+import {
+  BaseDrawTool,
+  type BaseDrawToolOptions,
+  type DrawState,
+} from "./draw/BaseDrawTool";
 
 export type PolylineDrawState = DrawState;
 
@@ -17,6 +21,7 @@ export type PolylineDrawToolOptions = BaseDrawToolOptions & {
 
 export class PolylineDrawTool extends BaseDrawTool {
   private lineEntity: Cesium.Entity | null = null;
+  private readonly toolOpts: PolylineDrawToolOptions;
 
   constructor(
     viewer: Cesium.Viewer,
@@ -24,9 +29,15 @@ export class PolylineDrawTool extends BaseDrawTool {
     pick: PickService,
     stack: CommandStack,
     store: FeatureStore,
-    private readonly toolOpts: PolylineDrawToolOptions = {}
+    toolOpts: PolylineDrawToolOptions = {},
   ) {
-    super(viewer, interactionLock, pick, stack, store, toolOpts);
+    // Default: allow LEFT_DOUBLE_CLICK to finish (still keeps zhis unless disabled).
+    const mergeOpt = {
+      finishOnDoubleClick: true,
+      ...toolOpts,
+    };
+    super(viewer, interactionLock, pick, stack, store, mergeOpt);
+    this.toolOpts = mergeOpt;
   }
 
   // Backwards-compat for ToolController
@@ -53,7 +64,7 @@ export class PolylineDrawTool extends BaseDrawTool {
         positions: positionsCb as any,
         width: this.toolOpts.lineWidth ?? 3,
         material: new Cesium.ColorMaterialProperty(
-          (this.toolOpts.lineColor ?? Cesium.Color.LIME).withAlpha(0.95)
+          (this.toolOpts.lineColor ?? Cesium.Color.LIME).withAlpha(0.95),
         ),
       },
       properties: { __type: "polyline", __source: "preview" },
@@ -74,7 +85,10 @@ export class PolylineDrawTool extends BaseDrawTool {
       this.toolOpts.onNotice?.(`提交失败：${err}`);
       return;
     }
-    const feature = createPolylineFeature({ positions: snapPositions, name: "polyline" });
+    const feature = createPolylineFeature({
+      positions: snapPositions,
+      name: "polyline",
+    });
     this.stack.push(new AddFeatureCommand(this.store, feature));
   }
 

@@ -1,36 +1,173 @@
 @import "cesium/Build/Cesium/Widgets/widgets.css";
 
-html, body, #app { height:100%; width:100%; margin:0; overflow:hidden; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
-#root { height:100%; width:100%; position:relative; }
-#cesiumContainer { position:absolute; inset:0; }
-
-.panel { position:absolute; top:12px; left:12px; z-index:10; display:grid; gap:8px; width:min(820px, calc(100vw - 24px));
-  padding:10px 12px; border-radius:10px; background: rgba(20,22,28,.78); color:#fff; backdrop-filter: blur(6px);
-  box-shadow: 0 6px 18px rgba(0,0,0,.25);
+html,
+body,
+#app {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  overflow: hidden;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
-.panel h1 { font-size:14px; margin:0; font-weight:600; letter-spacing:.2px; }
-.row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-.btn { appearance:none; border:1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.08); color:#fff; padding:6px 10px; border-radius:8px; cursor:pointer; font-size:12px; }
-.btn:hover { background: rgba(255,255,255,.12); } .btn:active { transform: translateY(1px); }
-.btn.primary { border-color: rgba(82,169,255,.45); background: rgba(82,169,255,.20); }
-.btn.danger { border-color: rgba(255,92,92,.45); background: rgba(255,92,92,.18); }
-.btn:disabled { opacity:.45; cursor:not-allowed; transform:none; }
 
-.kv { display:grid; grid-template-columns:132px 1fr; gap:6px 10px; font-size:12px; line-height:1.4; opacity:.95; }
-.kv b { font-weight:600; }
-
-.field { display:flex; align-items:center; gap:8px; font-size:12px; opacity:.95; }
-.field input[type="range"] { width: 160px; }
-.field code { opacity:.95; }
-
-.select { appearance:none; border:1px solid rgba(255,255,255,.16); background: rgba(0,0,0,.22); color:#fff; padding:6px 8px; border-radius:8px; font-size:12px; }
-
-.textarea { width:100%; min-height:120px; resize:vertical; border-radius:8px; border:1px solid rgba(255,255,255,.16);
-  background: rgba(0,0,0,.22); color:#fff; padding:8px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px;
+#root {
+  height: 100%;
+  width: 100%;
+  position: relative;
 }
-.hint { font-size:12px; opacity:.9; }
-.badge { display:inline-flex; align-items:center; gap:6px; padding:3px 8px; border-radius:999px; border:1px solid rgba(255,255,255,.16); background: rgba(0,0,0,.20); font-size:12px; }
-.dot { width:8px; height:8px; border-radius:999px; background:#6ee7b7; }
-.dot.off { background:#fca5a5; }
 
-.notice{margin:8px 0;padding:8px 10px;border:1px solid rgba(255,255,255,.15);border-radius:8px;font-size:12px;line-height:1.4;display:none;}
+#cesiumContainer {
+  position: absolute;
+  inset: 0;
+}
+
+.left-toolbar {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  z-index: 12;
+  display: grid;
+  gap: 10px;
+}
+
+.prop-panel {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 12;
+  width: min(360px, calc(100vw - 36px));
+  max-height: calc(100vh - 36px);
+  overflow: auto;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(20, 22, 28, 0.82);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(8px);
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.prop-panel.collapsed {
+  opacity: 0;
+  transform: translateX(20px);
+  pointer-events: none;
+}
+
+.panel-toggle {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 13;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.panel-section {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.9;
+}
+
+.panel-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn.primary {
+  border-color: rgba(82, 169, 255, 0.46);
+  background: rgba(82, 169, 255, 0.22);
+}
+
+.btn.danger {
+  border-color: rgba(255, 92, 92, 0.46);
+  background: rgba(255, 92, 92, 0.2);
+}
+
+.btn.ghost {
+  background: transparent;
+}
+
+.btn.active {
+  border-color: rgba(110, 231, 183, 0.66);
+  box-shadow: 0 0 0 1px rgba(110, 231, 183, 0.4) inset;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.draw-btn {
+  min-width: 96px;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.field input[type="range"] {
+  width: 130px;
+}
+
+code {
+  color: #d7e4ff;
+}
+
+.notice {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  display: none;
+  background: rgba(0, 0, 0, 0.2);
+}

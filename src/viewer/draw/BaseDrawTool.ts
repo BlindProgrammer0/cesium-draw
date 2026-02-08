@@ -9,6 +9,12 @@ export type DrawState = "idle" | "drawing" | "committed";
 export type BaseDrawToolOptions = {
   onNotice?: (msg: string) => void;
   pointColor?: Cesium.Color;
+  /** Whether RIGHT_CLICK finishes drawing. Default true. */
+  finishOnRightClick?: boolean;
+  /** Whether LEFT_DOUBLE_CLICK finishes drawing. Default false. */
+  finishOnDoubleClick?: boolean;
+  /** Whether to lock camera translate during drawing. Default true. */
+  lockTranslate?: boolean;
 };
 
 type Listener = () => void;
@@ -41,6 +47,8 @@ export abstract class BaseDrawTool {
   private onCommittedListeners: Listener[] = [];
 
   private releaseDrawLock: (() => void) | null = null;
+
+  private restoreDoubleClickAction: (() => void) | null = null;
 
   constructor(
     protected readonly viewer: Cesium.Viewer,
@@ -129,6 +137,46 @@ export abstract class BaseDrawTool {
     this.emitPoints();
   }
 
+
+/**
+ * Cesium Viewer has a default LEFT_DOUBLE_CLICK action (typically zoom/track) which conflicts with
+ * draw tools that finish on double-click. We temporarily remove it during drawing and restore it after.
+ */
+protected disableCesiumDefaultDoubleClick() {
+  const handler = this.viewer.screenSpaceEventHandler;
+  const type = Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK;
+
+  const old = handler.getInputAction(type);
+  if (!old) return;
+
+  handler.removeInputAction(type);
+
+  this.restoreDoubleClickAction = () => {
+    handler.setInputAction(old as any, type);
+  };
+}
+
+protected restoreCesiumDefaultDoubleClick() {
+  const r = this.restoreDoubleClickAction;
+  this.restoreDoubleClickAction = null;
+  r?.();
+}
+
+/**
+ * In some environments, a double-click can also trigger an extra LEFT_CLICK, resulting in a duplicated
+ * tail vertex. We defensively dedupe the last vertex before commit.
+ */
+protected dedupeTailVertex(positions: Cesium.Cartesian3[]) {
+  if (positions.length < 2) return;
+  const a = positions[positions.length - 1];
+  const b = positions[positions.length - 2];
+  if (Cesium.Cartesian3.distance(a, b) < 1e-6) {
+    positions.pop();
+    const lastPt = this.pointEntities.pop();
+    if (lastPt) this.ds.entities.remove(lastPt);
+  }
+}
+
   start() {
     if (this.state === "drawing") return;
 
@@ -139,7 +187,9 @@ export abstract class BaseDrawTool {
     this.handler = new Cesium.ScreenSpaceEventHandler(this.viewer.canvas);
 
     // Avoid right-drag translate conflicting with RIGHT_CLICK finish.
-    if (!this.releaseDrawLock) {
+    // Can be disabled via opts.lockTranslate (default true).
+    const lockTranslate = this.opts.lockTranslate ?? true;
+    if (lockTranslate && !this.releaseDrawLock) {
       this.releaseDrawLock = this.interactionLock.acquire("draw", {
         enableTranslate: false,
       });
@@ -149,7 +199,8 @@ export abstract class BaseDrawTool {
       const p = this.pick.pickPosition(movement.position);
       if (!p) return;
       this.onLeftClick(p);
-      this.ensurePreviewEntity();
+      // Some tools may finish on click (e.g., point draw). Only ensure preview if still drawing.
+      if (this.state === "drawing") this.ensurePreviewEntity();
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
     this.handler.setInputAction((movement: Cesium.ScreenSpaceEventHandler.MotionEvent) => {
@@ -158,13 +209,22 @@ export abstract class BaseDrawTool {
       this.onMouseMove(p);
     }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
-    this.handler.setInputAction(() => this.finish(), Cesium.ScreenSpaceEventType.RIGHT_CLICK);
+    if (this.opts.finishOnRightClick ?? true) {
+      this.handler.setInputAction(() => this.finish(), Cesium.ScreenSpaceEventType.RIGHT_CLICK);
+    }
+
+    if (this.opts.finishOnDoubleClick ?? false) {
+      this.disableCesiumDefaultDoubleClick();
+      this.handler.setInputAction(() => this.finish(), Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+    }
 
     this.ensurePreviewEntity();
   }
 
   finish() {
     if (this.state !== "drawing") return;
+    // Defensive: double-click may produce a duplicated tail point.
+    this.dedupeTailVertex(this.positions);
     if (this.positions.length < this.minPoints()) {
       this.opts.onNotice?.(`至少需要 ${this.minPoints()} 个点。`);
       return;
@@ -199,6 +259,8 @@ export abstract class BaseDrawTool {
     this.cleanupPreview();
     this.clearPointEntities();
     this.detachHandler();
+
+    this.restoreCesiumDefaultDoubleClick();
 
     if (this.releaseDrawLock) {
       const r = this.releaseDrawLock;
